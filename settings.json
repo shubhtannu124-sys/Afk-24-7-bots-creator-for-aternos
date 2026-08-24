@@ -5,8 +5,8 @@
   ],
 
   "bot-account": {
-    "password": "",
-    "type": "offline"
+    "type": "offline",
+    "password": ""
   },
 
   "server": {
@@ -16,13 +16,6 @@
     "try-creative": false
   },
 
-  "position": {
-    "enabled": true,
-    "x": 0,
-    "y": 100,
-    "z": 0
-  },
-
   "utils": {
     "auto-auth": {
       "enabled": true,
@@ -30,7 +23,6 @@
     },
 
     "anti-afk": {
-      "enabled": true,
       "sneak": true
     },
 
@@ -46,9 +38,7 @@
     "chat-log": true,
 
     "auto-reconnect": true,
-
     "auto-reconnect-delay": 15000,
-
     "max-reconnect-delay": 120000
   },
 
@@ -58,19 +48,19 @@
     "circle-walk": {
       "enabled": true,
       "radius": 4,
-      "speed": 5000,
+      "speed": 2500,
       "step-blocks": 2,
       "turn": "right"
     },
 
     "look-around": {
       "enabled": true,
-      "interval": 30000
+      "interval": 15000
     },
 
     "random-jump": {
       "enabled": true,
-      "interval": 60000
+      "interval": 30000
     }
   },
 
@@ -86,12 +76,16 @@
     "attack-mobs": true,
     "auto-eat": true,
     "attack-range": 3.5,
-    "attack-delay": 3000
+    "attack-delay": 1500
   },
 
   "beds": {
     "pick-up-day": false,
     "place-night": false
+  },
+
+  "performance": {
+    "disablePhysics": false
   },
 
   "discord": {
