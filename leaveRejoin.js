@@ -1,116 +1,291 @@
+"use strict";
+
 function randomMs(minMs, maxMs) {
-    return Math.floor(Math.random() * (maxMs - minMs + 1)) + minMs
+    return Math.floor(
+        Math.random() * (maxMs - minMs + 1)
+    ) + minMs;
 }
 
 function setupLeaveRejoin(bot, createBot) {
-    // Timers
-    let leaveTimer = null
-    let jumpTimer = null
-    let jumpOffTimer = null
-    let reconnectTimer = null
+    let leaveTimer = null;
+    let jumpTimer = null;
+    let jumpOffTimer = null;
+    let reconnectTimer = null;
 
-    // State
-    let stopped = false
-    let reconnectAttempts = 0
-    let lastLogAt = 0
+    let stopped = false;
+    let reconnecting = false;
+    let reconnectAttempts = 0;
+    let lastLogAt = 0;
 
-    function logThrottled(msg, minGapMs = 2000) {
-        const now = Date.now()
-        if (now - lastLogAt >= minGapMs) {
-            lastLogAt = now
-            console.log(msg)
+    function logThrottled(
+        message,
+        minGapMs = 3000
+    ) {
+        const now = Date.now();
+
+        if (
+            now - lastLogAt >=
+            minGapMs
+        ) {
+            lastLogAt = now;
+            console.log(message);
         }
     }
 
-    function cleanup() {
-        stopped = true
-        if (leaveTimer) clearTimeout(leaveTimer)
-        if (jumpTimer) clearTimeout(jumpTimer)
-        if (jumpOffTimer) clearTimeout(jumpOffTimer)
-        if (reconnectTimer) clearTimeout(reconnectTimer)
-        leaveTimer = jumpTimer = jumpOffTimer = reconnectTimer = null
+    function clearTimers() {
+        if (leaveTimer) {
+            clearTimeout(leaveTimer);
+            leaveTimer = null;
+        }
+
+        if (jumpTimer) {
+            clearTimeout(jumpTimer);
+            jumpTimer = null;
+        }
+
+        if (jumpOffTimer) {
+            clearTimeout(jumpOffTimer);
+            jumpOffTimer = null;
+        }
+
+        if (reconnectTimer) {
+            clearTimeout(reconnectTimer);
+            reconnectTimer = null;
+        }
+    }
+
+    function stop() {
+        stopped = true;
+        reconnecting = false;
+        clearTimers();
+
+        try {
+            bot.clearControlStates();
+        } catch (_) {}
     }
 
     function scheduleNextJump() {
-        if (stopped || !bot.entity) return
+        if (
+            stopped ||
+            !bot ||
+            !bot.entity
+        ) {
+            return;
+        }
 
-        bot.setControlState('jump', true)
-        jumpOffTimer = setTimeout(() => {
-            bot.setControlState('jump', false)
-        }, 300)
+        try {
+            bot.setControlState(
+                "jump",
+                true
+            );
 
-        // random jump 20s -> 5m
-        const nextJump = randomMs(20000, 5 * 60 * 1000)
-        jumpTimer = setTimeout(scheduleNextJump, nextJump)
+            jumpOffTimer =
+                setTimeout(() => {
+                    jumpOffTimer = null;
+
+                    try {
+                        if (
+                            !stopped &&
+                            bot
+                        ) {
+                            bot.setControlState(
+                                "jump",
+                                false
+                            );
+                        }
+                    } catch (_) {}
+                }, 200);
+        } catch (_) {}
+
+        const nextJump =
+            randomMs(
+                30000,
+                300000
+            );
+
+        jumpTimer =
+            setTimeout(
+                () => {
+                    jumpTimer = null;
+                    scheduleNextJump();
+                },
+                nextJump
+            );
     }
 
     function scheduleReconnect(reason) {
-        if (stopped) return
-
-        // Fast reconnect: 1 second delay
-        let delay = 1000 
-
-        reconnectAttempts++
-        if (reconnectAttempts > 3) {
-            delay += 5000 // Add a 5s delay only if it fails repeatedly
+        if (
+            stopped ||
+            reconnecting ||
+            !createBot
+        ) {
+            return;
         }
 
-        logThrottled(`[AFK] Rejoin scheduled in ${delay / 1000}s (reason: ${reason}, attempt: ${reconnectAttempts})`)
+        reconnecting = true;
+        reconnectAttempts++;
 
-        reconnectTimer = setTimeout(() => {
-            if (stopped) return
-            try {
-                if (typeof createBot === 'function') createBot()
-            } catch (e) {
-                console.log('[AFK] createBot error:', e?.message || e)
-                scheduleReconnect('createBot-error')
-            }
-        }, delay)
+        /*
+        Never reconnect immediately.
+        This prevents Aternos connection throttling.
+        */
+
+        const delay = Math.min(
+            120000,
+            30000 *
+                Math.pow(
+                    2,
+                    Math.min(
+                        reconnectAttempts - 1,
+                        2
+                    )
+                )
+        );
+
+        logThrottled(
+            `[AFK] Rejoin scheduled in ${
+                Math.ceil(delay / 1000)
+            }s (${reason})`
+        );
+
+        reconnectTimer =
+            setTimeout(() => {
+                reconnectTimer = null;
+
+                if (stopped) {
+                    reconnecting = false;
+                    return;
+                }
+
+                try {
+                    createBot();
+                } catch (error) {
+                    reconnecting = false;
+
+                    console.log(
+                        "[AFK] createBot error:",
+                        error?.message ||
+                            error
+                    );
+
+                    scheduleReconnect(
+                        "createBot-error"
+                    );
+                }
+            }, delay);
     }
 
-    bot.once('spawn', () => {
-        reconnectAttempts = 0
-        cleanup()
-        stopped = false
+    bot.once(
+        "spawn",
+        () => {
+            stopped = false;
+            reconnecting = false;
+            reconnectAttempts = 0;
 
-        // 1000 seconds exactly
-        const stayTime = 1000 * 1000 
+            clearTimers();
 
-        logThrottled(`[AFK] Will leave in ${stayTime / 1000} seconds to prevent AFK ban`)
+            /*
+            Leave after ~16 minutes.
+            Your main index.js can also handle reconnecting.
+            */
 
-        scheduleNextJump()
+            const stayTime =
+                1000 * 1000;
 
-        leaveTimer = setTimeout(() => {
-            if (stopped) return
-            logThrottled('[AFK] 1000 seconds reached. Leaving server.')
-            cleanup()
-            try {
-                bot.quit()
-            } catch (e) {
-                // ignore if already closed
+            logThrottled(
+                `[AFK] Will leave in ${
+                    stayTime / 1000
+                } seconds.`
+            );
+
+            scheduleNextJump();
+
+            leaveTimer =
+                setTimeout(() => {
+                    leaveTimer = null;
+
+                    if (stopped) {
+                        return;
+                    }
+
+                    logThrottled(
+                        "[AFK] Leave timer reached."
+                    );
+
+                    try {
+                        bot.quit(
+                            "AFK cycle"
+                        );
+                    } catch (_) {}
+                }, stayTime);
+        }
+    );
+
+    bot.once(
+        "end",
+        () => {
+            if (stopped) {
+                return;
             }
-        }, stayTime)
-    })
 
-    bot.on('end', () => {
-        cleanup()
-        stopped = false // Reset stopped to allow scheduleReconnect to run
-        scheduleReconnect('disconnected')
-    })
+            clearTimers();
 
-    bot.on('kicked', (reason) => {
-        cleanup()
-        stopped = false // Reset stopped to allow scheduleReconnect to run
-        console.log(`[AFK] Bot was kicked! Reason: ${reason}`)
-        scheduleReconnect('kicked')
-    })
+            reconnecting = false;
 
-    bot.on('error', (err) => {
-        cleanup()
-        stopped = false // Reset stopped to allow scheduleReconnect to run
-        console.log(`[AFK] Connection Error: ${err}`)
-        scheduleReconnect('error')
-    })
+            scheduleReconnect(
+                "disconnected"
+            );
+        }
+    );
+
+    bot.once(
+        "kicked",
+        reason => {
+            if (stopped) {
+                return;
+            }
+
+            clearTimers();
+
+            reconnecting = false;
+
+            console.log(
+                `[AFK] Bot was kicked: ${reason}`
+            );
+
+            scheduleReconnect(
+                "kicked"
+            );
+        }
+    );
+
+    bot.on(
+        "error",
+        error => {
+            if (stopped) {
+                return;
+            }
+
+            console.log(
+                `[AFK] Connection error: ${
+                    error?.message ||
+                    error
+                }`
+            );
+
+            /*
+            Do not immediately reconnect here.
+            Mineflayer normally emits "end" after
+            the connection closes.
+            */
+
+        }
+    );
+
+    return {
+        stop
+    };
 }
 
-module.exports = setupLeaveRejoin
+module.exports =
+    setupLeaveRejoin;
