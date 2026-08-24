@@ -1,7 +1,9 @@
 "use strict";
 
 const mineflayer = require("mineflayer");
+const { Movements, pathfinder } = require("mineflayer-pathfinder");
 const express = require("express");
+const https = require("https");
 
 const { addLog, getLogs } = require("./logger");
 const skins = require("./skin");
@@ -16,21 +18,88 @@ app.use(express.json({ limit: "16kb" }));
 
 const WEB_PORT = Number(process.env.PORT) || 5000;
 
-const HOST =
-  config.server?.ip || "localhost";
+const SERVER_HOST =
+  config?.server?.ip || "localhost";
 
-const MC_PORT =
-  Number(config.server?.port) || 25565;
+const SERVER_PORT =
+  Number(config?.server?.port) || 25565;
 
-const VERSION =
-  config.server?.version || undefined;
+const SERVER_VERSION =
+  config?.server?.version || undefined;
 
-const AUTH =
-  config["bot-account"]?.type || "offline";
+const AUTH_TYPE =
+  config?.["bot-account"]?.type || "offline";
 
-const STATES = new Map();
+const DEFAULT_PASSWORD =
+  config?.["bot-account"]?.password || "";
+
+const MAX_ERRORS = 25;
 
 let shuttingDown = false;
+
+// ============================================================
+// BOT STATE
+// ============================================================
+
+if (!Array.isArray(config.bots)) {
+  throw new Error(
+    'settings.json must contain a "bots" array.'
+  );
+}
+
+const botNames = [
+  ...new Set(
+    config.bots
+      .map(name => String(name).trim())
+      .filter(Boolean)
+  )
+];
+
+if (botNames.length === 0) {
+  throw new Error(
+    "No bots are configured."
+  );
+}
+
+const states = new Map();
+
+function createState(name) {
+  return {
+    name,
+
+    bot: null,
+    movements: null,
+
+    connected: false,
+    connecting: false,
+    manualStop: false,
+
+    generation: 0,
+
+    movementTimer: null,
+    lookTimer: null,
+    jumpTimer: null,
+    chatTimer: null,
+    combatTimer: null,
+    eatTimer: null,
+    authTimer: null,
+    skinTimer: null,
+    reconnectTimer: null,
+
+    eating: false,
+
+    reconnectAttempts: 0,
+
+    startTime: Date.now(),
+    lastActivity: Date.now(),
+
+    errors: []
+  };
+}
+
+for (const name of botNames) {
+  states.set(name, createState(name));
+}
 
 // ============================================================
 // LOGGING
@@ -46,7 +115,7 @@ function log(message) {
   } catch (_) {}
 }
 
-function recordError(state, error) {
+function rememberError(state, error) {
   const text =
     error instanceof Error
       ? error.stack || error.message
@@ -57,170 +126,302 @@ function recordError(state, error) {
     message: text.slice(0, 2000)
   });
 
-  if (state.errors.length > 20) {
-    state.errors.shift();
+  if (state.errors.length > MAX_ERRORS) {
+    state.errors.splice(
+      0,
+      state.errors.length - MAX_ERRORS
+    );
   }
 
   log(`[${state.name}] ${text}`);
 }
 
 // ============================================================
-// BOT STATES
-// ============================================================
-
-if (!Array.isArray(config.bots)) {
-  throw new Error(
-    'settings.json must contain a "bots" array.'
-  );
-}
-
-for (const rawName of config.bots) {
-  const name = String(rawName).trim();
-
-  if (!name || STATES.has(name)) {
-    continue;
-  }
-
-  STATES.set(name, {
-    name,
-
-    bot: null,
-
-    connected: false,
-    connecting: false,
-    manualStop: false,
-
-    generation: 0,
-
-    reconnectTimer: null,
-    authTimer: null,
-    skinTimer: null,
-    afkTimer: null,
-
-    reconnectAttempts: 0,
-
-    errors: []
-  });
-}
-
-if (STATES.size === 0) {
-  throw new Error("No bots configured.");
-}
-
-// ============================================================
 // HELPERS
 // ============================================================
 
-function getState(name) {
-  return STATES.get(String(name)) || null;
+function findBot(name) {
+  if (!name) return null;
+
+  return (
+    states.get(String(name)) ||
+    null
+  );
+}
+
+function touch(state) {
+  state.lastActivity = Date.now();
+}
+
+function clearTimer(timer, interval = false) {
+  if (!timer) return null;
+
+  if (interval) {
+    clearInterval(timer);
+  } else {
+    clearTimeout(timer);
+  }
+
+  return null;
 }
 
 function clearReconnect(state) {
-  if (!state.reconnectTimer) return;
-
-  clearTimeout(state.reconnectTimer);
-  state.reconnectTimer = null;
+  state.reconnectTimer =
+    clearTimer(
+      state.reconnectTimer
+    );
 }
 
-function clearTimers(state) {
-  if (state.reconnectTimer) {
-    clearTimeout(state.reconnectTimer);
-    state.reconnectTimer = null;
-  }
-
-  if (state.authTimer) {
-    clearTimeout(state.authTimer);
-    state.authTimer = null;
-  }
-
-  if (state.skinTimer) {
-    clearTimeout(state.skinTimer);
-    state.skinTimer = null;
-  }
-
-  if (state.afkTimer) {
-    clearInterval(state.afkTimer);
-    state.afkTimer = null;
-  }
-}
-
-// ============================================================
-// SKIN
-// ============================================================
-
-function applySkin(state) {
-  const skin = skins[state.name];
-
-  if (!skin?.customName) {
-    log(
-      `[${state.name}] No custom skin configured.`
+function clearFeatureTimers(state) {
+  state.movementTimer =
+    clearTimer(
+      state.movementTimer
     );
 
-    return {
-      success: false,
-      msg: `${state.name}: no skin configured.`
-    };
-  }
+  state.lookTimer =
+    clearTimer(
+      state.lookTimer,
+      true
+    );
 
-  if (!state.bot || !state.connected) {
-    return {
-      success: false,
-      msg: `${state.name} is not connected.`
-    };
-  }
+  state.jumpTimer =
+    clearTimer(
+      state.jumpTimer,
+      true
+    );
 
+  state.chatTimer =
+    clearTimer(
+      state.chatTimer,
+      true
+    );
+
+  state.combatTimer =
+    clearTimer(
+      state.combatTimer,
+      true
+    );
+
+  state.eatTimer =
+    clearTimer(
+      state.eatTimer,
+      true
+    );
+
+  state.authTimer =
+    clearTimer(
+      state.authTimer
+    );
+
+  state.skinTimer =
+    clearTimer(
+      state.skinTimer
+    );
+}
+
+function uptime(state) {
+  return Math.floor(
+    (Date.now() - state.startTime) / 1000
+  );
+}
+
+function escapeHTML(value) {
+  return String(value).replace(
+    /[&<>"']/g,
+    char =>
+      ({
+        "&": "&amp;",
+        "<": "&lt;",
+        ">": "&gt;",
+        '"': "&quot;",
+        "'": "&#39;"
+      })[char]
+  );
+}
+
+// ============================================================
+// DISCORD
+// ============================================================
+
+function sendDiscord(
+  state,
+  event,
+  message
+) {
   try {
-    state.bot.chat(
-      `/skin ${skin.customName}`
+    if (!config.discord?.enabled) return;
+
+    if (!config.discord?.events?.[event]) {
+      return;
+    }
+
+    const webhook =
+      config.discord?.webhookUrl;
+
+    if (!webhook) return;
+
+    const url = new URL(webhook);
+
+    const body = JSON.stringify({
+      content:
+        `[${state.name}] ${message}`
+    });
+
+    const request = https.request(
+      {
+        hostname: url.hostname,
+        port: url.port || 443,
+        path:
+          url.pathname +
+          url.search,
+        method: "POST",
+        headers: {
+          "Content-Type":
+            "application/json",
+          "Content-Length":
+            Buffer.byteLength(body)
+        },
+        timeout: 5000
+      },
+      response => {
+        response.resume();
+      }
     );
 
-    log(
-      `[${state.name}] Skin command sent: ${skin.customName}`
-    );
+    request.on("error", () => {});
 
-    return {
-      success: true,
-      msg:
-        `${state.name}: skin command sent.`
-    };
-  } catch (error) {
-    recordError(state, error);
-
-    return {
-      success: false,
-      msg:
-        `${state.name}: failed to apply skin.`
-    };
-  }
+    request.write(body);
+    request.end();
+  } catch (_) {}
 }
 
 // ============================================================
-// ANTI-AFK
+// RECONNECT
 // ============================================================
 
-function startAntiAfk(state) {
+function reconnectDelay(state) {
+  const first = Math.max(
+    15000,
+    Number(
+      config.utils?.[
+        "auto-reconnect-delay"
+      ]
+    ) || 15000
+  );
+
+  const maximum = Math.max(
+    first,
+    Number(
+      config.utils?.[
+        "max-reconnect-delay"
+      ]
+    ) || 120000
+  );
+
+  return Math.min(
+    maximum,
+    first *
+      Math.pow(
+        2,
+        Math.min(
+          state.reconnectAttempts,
+          6
+        )
+      )
+  );
+}
+
+function scheduleReconnect(
+  state,
+  reason = ""
+) {
   if (
-    !config["anti-afk"]?.enabled ||
-    !state.bot
+    shuttingDown ||
+    state.manualStop ||
+    state.connecting ||
+    state.bot ||
+    state.reconnectTimer ||
+    !config.utils?.[
+      "auto-reconnect"
+    ]
   ) {
     return;
   }
 
-  if (state.afkTimer) {
-    clearInterval(state.afkTimer);
+  const delay =
+    reconnectDelay(state);
+
+  state.reconnectAttempts++;
+
+  log(
+    `[${state.name}] Reconnecting in ${Math.ceil(
+      delay / 1000
+    )}s${
+      reason
+        ? ` (${reason})`
+        : ""
+    }`
+  );
+
+  state.reconnectTimer =
+    setTimeout(
+      () => {
+        state.reconnectTimer = null;
+
+        if (!shuttingDown) {
+          startBot(state);
+        }
+      },
+      delay
+    );
+}
+
+// ============================================================
+// MOVEMENT
+// ============================================================
+
+function stopMovement(state) {
+  state.movementTimer =
+    clearTimer(
+      state.movementTimer
+    );
+
+  if (!state.bot) return;
+
+  try {
+    state.bot.clearControlStates();
+  } catch (_) {}
+}
+
+function startCircleWalk(state) {
+  stopMovement(state);
+
+  if (
+    !config.movement?.enabled ||
+    !config.movement?.[
+      "circle-walk"
+    ]?.enabled
+  ) {
+    return;
   }
 
-  const interval = Math.max(
-    60000,
-    Number(config["anti-afk"].interval) || 120000
-  );
+  const movement =
+    config.movement[
+      "circle-walk"
+    ];
 
-  const pulse = Math.max(
-    50,
-    Number(config["anti-afk"].pulse) || 150
-  );
+  const stepTime =
+    Math.max(
+      1000,
+      Number(movement.speed) || 2500
+    );
 
-  state.afkTimer = setInterval(() => {
+  const turn =
+    String(
+      movement.turn || "right"
+    ).toLowerCase();
+
+  function walkStep() {
     const bot = state.bot;
 
     if (
@@ -229,6 +430,7 @@ function startAntiAfk(state) {
       state.manualStop ||
       shuttingDown
     ) {
+      stopMovement(state);
       return;
     }
 
@@ -238,63 +440,657 @@ function startAntiAfk(state) {
         true
       );
 
-      setTimeout(() => {
-        if (state.bot !== bot) return;
+      state.movementTimer =
+        setTimeout(
+          async () => {
+            state.movementTimer = null;
 
-        try {
-          bot.setControlState(
-            "forward",
-            false
-          );
-        } catch (_) {}
-      }, pulse);
+            if (
+              !state.bot ||
+              !state.connected ||
+              state.manualStop
+            ) {
+              stopMovement(state);
+              return;
+            }
 
+            try {
+              bot.setControlState(
+                "forward",
+                false
+              );
+
+              if (bot.entity) {
+                const yaw =
+                  Number(
+                    bot.entity.yaw
+                  ) || 0;
+
+                const amount =
+                  Math.PI / 2;
+
+                const newYaw =
+                  turn === "left"
+                    ? yaw - amount
+                    : yaw + amount;
+
+                await bot.look(
+                  newYaw,
+                  0,
+                  true
+                );
+              }
+
+              touch(state);
+            } catch (error) {
+              rememberError(
+                state,
+                error
+              );
+            }
+
+            state.movementTimer =
+              setTimeout(
+                walkStep,
+                1000
+              );
+          },
+          stepTime
+        );
     } catch (error) {
-      recordError(state, error);
+      rememberError(
+        state,
+        error
+      );
+
+      state.movementTimer =
+        setTimeout(
+          walkStep,
+          3000
+        );
     }
-  }, interval);
+  }
+
+  walkStep();
 
   log(
-    `[${state.name}] Anti-AFK enabled: ${Math.round(
-      interval / 1000
-    )}s pulse interval.`
+    `[${state.name}] Anti-AFK movement enabled.`
   );
 }
 
 // ============================================================
-// AUTO LOGIN
+// SNEAK
 // ============================================================
 
-function startAutoAuth(state) {
-  const auth = config.utils?.["auto-auth"];
-
-  if (!auth?.enabled || !auth.password) {
+function startSneak(state) {
+  if (
+    !config.utils?.[
+      "anti-afk"
+    ]?.sneak ||
+    !state.bot
+  ) {
     return;
   }
 
-  if (state.authTimer) {
-    clearTimeout(state.authTimer);
+  try {
+    state.bot.setControlState(
+      "sneak",
+      true
+    );
+  } catch (_) {}
+}
+
+// ============================================================
+// LOOK
+// ============================================================
+
+function startLookAround(state) {
+  if (
+    !config.movement?.[
+      "look-around"
+    ]?.enabled
+  ) {
+    return;
   }
 
-  state.authTimer = setTimeout(() => {
-    state.authTimer = null;
+  const interval =
+    Math.max(
+      5000,
+      Number(
+        config.movement[
+          "look-around"
+        ].interval
+      ) || 10000
+    );
 
-    if (!state.bot || !state.connected) {
-      return;
-    }
+  state.lookTimer =
+    setInterval(
+      async () => {
+        const bot = state.bot;
 
-    try {
-      state.bot.chat(
-        `/login ${auth.password}`
+        if (
+          !bot ||
+          !state.connected ||
+          !bot.entity
+        ) {
+          return;
+        }
+
+        try {
+          const yaw =
+            Number(
+              bot.entity.yaw
+            ) || 0;
+
+          const change =
+            (
+              Math.random() - 0.5
+            ) * Math.PI;
+
+          await bot.look(
+            yaw + change,
+            0,
+            false
+          );
+
+          touch(state);
+        } catch (_) {}
+      },
+      interval
+    );
+}
+
+// ============================================================
+// RANDOM JUMP
+// ============================================================
+
+function startRandomJump(state) {
+  if (
+    !config.movement?.[
+      "random-jump"
+    ]?.enabled
+  ) {
+    return;
+  }
+
+  const interval =
+    Math.max(
+      10000,
+      Number(
+        config.movement[
+          "random-jump"
+        ].interval
+      ) || 30000
+    );
+
+  state.jumpTimer =
+    setInterval(
+      () => {
+        const bot = state.bot;
+
+        if (
+          !bot ||
+          !state.connected
+        ) {
+          return;
+        }
+
+        try {
+          bot.setControlState(
+            "jump",
+            true
+          );
+
+          setTimeout(
+            () => {
+              if (state.bot !== bot) {
+                return;
+              }
+
+              try {
+                bot.setControlState(
+                  "jump",
+                  false
+                );
+              } catch (_) {}
+            },
+            150
+          );
+        } catch (_) {}
+      },
+      interval
+    );
+}
+
+// ============================================================
+// AUTO AUTH
+// ============================================================
+
+function startAutoAuth(state) {
+  if (
+    !config.utils?.[
+      "auto-auth"
+    ]?.enabled
+  ) {
+    return;
+  }
+
+  const password =
+    String(
+      config.utils[
+        "auto-auth"
+      ].password || ""
+    );
+
+  if (!password) return;
+
+  state.authTimer =
+    setTimeout(
+      () => {
+        state.authTimer = null;
+
+        if (
+          !state.bot ||
+          !state.connected
+        ) {
+          return;
+        }
+
+        try {
+          state.bot.chat(
+            `/login ${password}`
+          );
+
+          log(
+            `[${state.name}] Auto-auth command sent.`
+          );
+        } catch (error) {
+          rememberError(
+            state,
+            error
+          );
+        }
+      },
+      2500
+    );
+}
+
+// ============================================================
+// CHAT MESSAGES
+// ============================================================
+
+function startChatMessages(state) {
+  const chat =
+    config.utils?.[
+      "chat-messages"
+    ];
+
+  if (
+    !chat?.enabled ||
+    !chat.repeat ||
+    !Array.isArray(chat.messages) ||
+    chat.messages.length === 0
+  ) {
+    return;
+  }
+
+  const seconds =
+    Math.max(
+      30,
+      Number(
+        chat["repeat-delay"]
+      ) || 120
+    );
+
+  state.chatTimer =
+    setInterval(
+      () => {
+        if (
+          !state.bot ||
+          !state.connected
+        ) {
+          return;
+        }
+
+        try {
+          const message =
+            String(
+              chat.messages[
+                Math.floor(
+                  Math.random() *
+                    chat.messages.length
+                )
+              ]
+            ).slice(
+              0,
+              256
+            );
+
+          state.bot.chat(
+            message
+          );
+
+          touch(state);
+        } catch (error) {
+          rememberError(
+            state,
+            error
+          );
+        }
+      },
+      seconds * 1000
+    );
+}
+
+// ============================================================
+// AUTO EAT
+// ============================================================
+
+const FOOD_NAMES =
+  new Set([
+    "bread",
+    "cooked_beef",
+    "cooked_porkchop",
+    "cooked_chicken",
+    "cooked_mutton",
+    "cooked_rabbit",
+    "cooked_cod",
+    "cooked_salmon",
+    "baked_potato",
+    "carrot",
+    "golden_carrot",
+    "apple",
+    "melon_slice",
+    "sweet_berries",
+    "glow_berries",
+    "beetroot",
+    "potato",
+    "pumpkin_pie",
+    "cookie"
+  ]);
+
+async function tryEat(state) {
+  if (
+    state.eating ||
+    !state.bot ||
+    !state.connected
+  ) {
+    return;
+  }
+
+  if (
+    !config.combat?.[
+      "auto-eat"
+    ]
+  ) {
+    return;
+  }
+
+  if (
+    Number(state.bot.food) > 12
+  ) {
+    return;
+  }
+
+  const food =
+    state.bot.inventory
+      .items()
+      .find(
+        item =>
+          FOOD_NAMES.has(
+            item.name
+          )
       );
 
-      log(
-        `[${state.name}] Auto-auth command sent.`
-      );
-    } catch (error) {
-      recordError(state, error);
-    }
-  }, 3000);
+  if (!food) return;
+
+  state.eating = true;
+
+  try {
+    await state.bot.equip(
+      food,
+      "hand"
+    );
+
+    await state.bot.consume();
+
+    log(
+      `[${state.name}] Ate ${food.name}.`
+    );
+  } catch (error) {
+    rememberError(
+      state,
+      error
+    );
+  } finally {
+    state.eating = false;
+  }
+}
+
+function startAutoEat(state) {
+  if (
+    !config.combat?.[
+      "auto-eat"
+    ]
+  ) {
+    return;
+  }
+
+  state.eatTimer =
+    setInterval(
+      () => {
+        tryEat(state);
+      },
+      10000
+    );
+}
+
+// ============================================================
+// COMBAT
+// ============================================================
+
+const HOSTILE_MOBS =
+  new Set([
+    "zombie",
+    "skeleton",
+    "spider",
+    "creeper",
+    "witch",
+    "enderman",
+    "drowned",
+    "husk",
+    "stray",
+    "pillager",
+    "vindicator",
+    "ravager",
+    "phantom",
+    "silverfish",
+    "cave_spider"
+  ]);
+
+function isHostileMob(entity) {
+  if (
+    !entity ||
+    entity.type !== "mob" ||
+    !entity.position
+  ) {
+    return false;
+  }
+
+  return HOSTILE_MOBS.has(
+    String(
+      entity.name || ""
+    ).toLowerCase()
+  );
+}
+
+function startCombat(state) {
+  if (
+    !config.modules?.combat ||
+    !config.combat?.[
+      "attack-mobs"
+    ]
+  ) {
+    return;
+  }
+
+  const interval =
+    Math.max(
+      750,
+      Number(
+        config.combat[
+          "attack-delay"
+        ]
+      ) || 1500
+    );
+
+  state.combatTimer =
+    setInterval(
+      () => {
+        const bot = state.bot;
+
+        if (
+          !bot ||
+          !state.connected ||
+          !bot.entity
+        ) {
+          return;
+        }
+
+        try {
+          const range =
+            Number(
+              config.combat[
+                "attack-range"
+              ]
+            ) || 3.5;
+
+          const target =
+            bot.nearestEntity(
+              entity => {
+                if (
+                  !isHostileMob(
+                    entity
+                  )
+                ) {
+                  return false;
+                }
+
+                return (
+                  bot.entity.position.distanceTo(
+                    entity.position
+                  ) <= range
+                );
+              }
+            );
+
+          if (!target) return;
+
+          bot.attack(target);
+
+          touch(state);
+        } catch (error) {
+          rememberError(
+            state,
+            error
+          );
+        }
+      },
+      interval
+    );
+}
+
+// ============================================================
+// SKIN
+// ============================================================
+
+function applySkin(state) {
+  const skin =
+    skins[state.name];
+
+  if (
+    !skin?.customName
+  ) {
+    return {
+      success: false,
+      msg:
+        `${state.name}: no skin configured.`
+    };
+  }
+
+  if (
+    !state.bot ||
+    !state.connected
+  ) {
+    return {
+      success: false,
+      msg:
+        `${state.name} is not connected.`
+    };
+  }
+
+  try {
+    /*
+    This assumes the custom skin has already been
+    created in SkinsRestorer.
+    */
+
+    const command =
+      `/skin set ${skin.customName}`;
+
+    state.bot.chat(command);
+
+    log(
+      `[${state.name}] Skin command sent: ${command}`
+    );
+
+    return {
+      success: true,
+      msg:
+        `${state.name}: skin command sent.`
+    };
+  } catch (error) {
+    rememberError(
+      state,
+      error
+    );
+
+    return {
+      success: false,
+      msg:
+        `${state.name}: skin command failed.`
+    };
+  }
+}
+
+// ============================================================
+// FEATURES
+// ============================================================
+
+function startFeatures(state) {
+  startCircleWalk(state);
+  startLookAround(state);
+  startRandomJump(state);
+  startChatMessages(state);
+  startAutoEat(state);
+  startCombat(state);
+  startSneak(state);
+  startAutoAuth(state);
+
+  state.skinTimer =
+    setTimeout(
+      () => {
+        state.skinTimer = null;
+
+        if (
+          state.bot &&
+          state.connected
+        ) {
+          applySkin(state);
+        }
+      },
+      5000
+    );
 }
 
 // ============================================================
@@ -305,11 +1101,14 @@ function cleanupBot(
   state,
   reason = "cleanup"
 ) {
-  clearTimers(state);
+  stopMovement(state);
+  clearFeatureTimers(state);
 
-  const bot = state.bot;
+  const bot =
+    state.bot;
 
   state.bot = null;
+  state.movements = null;
   state.connected = false;
   state.connecting = false;
 
@@ -329,68 +1128,262 @@ function cleanupBot(
 }
 
 // ============================================================
-// RECONNECT
+// EVENTS
 // ============================================================
 
-function scheduleReconnect(
+function registerEvents(
   state,
-  reason = ""
+  bot,
+  generation
 ) {
-  if (
-    shuttingDown ||
-    state.manualStop ||
-    state.bot ||
-    state.connecting ||
-    state.reconnectTimer ||
-    !config.utils?.["auto-reconnect"]
-  ) {
-    return;
-  }
+  bot.on("login", () => {
+    if (
+      generation !==
+      state.generation
+    ) {
+      return;
+    }
 
-  const base = Math.max(
-    30000,
-    Number(
-      config.utils["auto-reconnect-delay"]
-    ) || 30000
+    log(
+      `[${state.name}] Logged in.`
+    );
+  });
+
+  bot.once("spawn", () => {
+    if (
+      generation !==
+        state.generation ||
+      state.bot !== bot
+    ) {
+      return;
+    }
+
+    state.connected = true;
+    state.reconnectAttempts = 0;
+    state.startTime = Date.now();
+
+    touch(state);
+
+    log(
+      `[${state.name}] Spawned successfully.`
+    );
+
+    try {
+      state.movements =
+        new Movements(bot);
+
+      state.movements.canDig = false;
+      state.movements.allow1by1towers = false;
+      state.movements.allowFreeMotion = false;
+
+      bot.pathfinder.setMovements(
+        state.movements
+      );
+    } catch (error) {
+      rememberError(
+        state,
+        error
+      );
+
+      log(
+        `[${state.name}] Pathfinder setup warning: ${
+          error?.message || error
+        }`
+      );
+    }
+
+    if (
+      config.performance?.disablePhysics
+    ) {
+      bot.physicsEnabled = false;
+    }
+
+    startFeatures(state);
+
+    sendDiscord(
+      state,
+      "connect",
+      "Connected."
+    );
+
+    log(
+      `[${state.name}] All features started.`
+    );
+  });
+
+  bot.on(
+    "chat",
+    (
+      username,
+      message
+    ) => {
+      if (
+        generation !==
+        state.generation
+      ) {
+        return;
+      }
+
+      touch(state);
+
+      if (
+        config.utils?.[
+          "chat-log"
+        ]
+      ) {
+        log(
+          `[${state.name}] <${username}> ${message}`
+        );
+      }
+
+      if (
+        config.discord?.events?.chat
+      ) {
+        sendDiscord(
+          state,
+          "chat",
+          `<${username}> ${message}`
+        );
+      }
+
+      if (
+        !config.chat?.respond ||
+        username ===
+          state.name
+      ) {
+        return;
+      }
+
+      const text =
+        String(message)
+          .toLowerCase()
+          .trim();
+
+      if (
+        text === "hi" ||
+        text === "hello" ||
+        text === "hey"
+      ) {
+        try {
+          state.bot.chat(
+            `Hello ${username}!`
+          );
+        } catch (_) {}
+      }
+    }
   );
 
-  const maximum = Math.max(
-    base,
-    Number(
-      config.utils["max-reconnect-delay"]
-    ) || 180000
+  bot.on(
+    "whisper",
+    (
+      username,
+      message
+    ) => {
+      if (
+        config.utils?.[
+          "chat-log"
+        ]
+      ) {
+        log(
+          `[${state.name}] [WHISPER] <${username}> ${message}`
+        );
+      }
+
+      touch(state);
+    }
   );
 
-  const delay = Math.min(
-    maximum,
-    base *
-      Math.pow(
-        2,
-        Math.min(
-          state.reconnectAttempts,
-          3
-        )
-      )
+  bot.on(
+    "kicked",
+    reason => {
+      if (
+        generation !==
+        state.generation
+      ) {
+        return;
+      }
+
+      state.connected = false;
+
+      let text;
+
+      try {
+        text =
+          typeof reason ===
+            "string"
+            ? reason
+            : JSON.stringify(
+                reason
+              );
+      } catch (_) {
+        text =
+          String(reason);
+      }
+
+      log(
+        `[${state.name}] Kicked: ${text}`
+      );
+
+      sendDiscord(
+        state,
+        "disconnect",
+        `Kicked: ${text}`
+      );
+    }
   );
 
-  state.reconnectAttempts++;
+  bot.on(
+    "error",
+    error => {
+      if (
+        generation !==
+        state.generation
+      ) {
+        return;
+      }
 
-  log(
-    `[${state.name}] Reconnecting in ${Math.ceil(
-      delay / 1000
-    )}s${
-      reason ? ` (${reason})` : ""
-    }`
+      rememberError(
+        state,
+        error
+      );
+    }
   );
 
-  state.reconnectTimer =
-    setTimeout(() => {
-      state.reconnectTimer = null;
+  bot.on(
+    "end",
+    reason => {
+      if (
+        generation !==
+        state.generation
+      ) {
+        return;
+      }
 
-      if (shuttingDown) return;
+      cleanupBot(
+        state,
+        "connection ended"
+      );
 
-      startBot(state);
-    }, delay);
+      log(
+        `[${state.name}] Connection ended${
+          reason
+            ? `: ${reason}`
+            : ""
+        }`
+      );
+
+      sendDiscord(
+        state,
+        "disconnect",
+        "Disconnected."
+      );
+
+      scheduleReconnect(
+        state,
+        "connection ended"
+      );
+    }
+  );
 }
 
 // ============================================================
@@ -400,13 +1393,14 @@ function scheduleReconnect(
 async function startBot(state) {
   if (
     shuttingDown ||
-    state.bot ||
-    state.connecting
+    state.connecting ||
+    state.bot
   ) {
     return false;
   }
 
   state.manualStop = false;
+
   clearReconnect(state);
 
   state.connecting = true;
@@ -416,251 +1410,68 @@ async function startBot(state) {
 
   try {
     log(
-      `[${state.name}] Connecting to ${HOST}:${MC_PORT}...`
+      `[${state.name}] Connecting to ${SERVER_HOST}:${SERVER_PORT}...`
     );
-
-    /*
-    These are deliberately close to the settings
-    that already successfully spawned your bots.
-
-    No Pathfinder.
-    No combat.
-    No entity scanning.
-    */
 
     const bot =
       mineflayer.createBot({
-        host: HOST,
+        host:
+          SERVER_HOST,
 
-        port: MC_PORT,
+        port:
+          SERVER_PORT,
 
         username:
           state.name,
 
-        auth: AUTH,
+        auth:
+          AUTH_TYPE,
 
         password:
-          config["bot-account"]?.password ||
+          DEFAULT_PASSWORD ||
           undefined,
 
-        version: VERSION,
+        version:
+          SERVER_VERSION,
 
-        physicsEnabled: true,
+        viewDistance:
+          2,
 
-        viewDistance: 2,
+        physicsEnabled:
+          config.performance?.disablePhysics
+            ? false
+            : true,
 
-        chatLog: false,
+        chatLog:
+          false,
 
-        checkTimeoutInterval: 30000,
+        checkTimeoutInterval:
+          30000,
 
-        connectTimeout: 30000,
+        connectTimeout:
+          30000,
 
-        hideErrors: false
+        hideErrors:
+          false
       });
 
     state.bot = bot;
 
-    // --------------------------------------------------------
-    // LOGIN
-    // --------------------------------------------------------
-
-    bot.once("login", () => {
-      if (
-        generation !== state.generation
-      ) {
-        return;
-      }
-
-      log(
-        `[${state.name}] Logged in.`
-      );
-    });
-
-    // --------------------------------------------------------
-    // SPAWN
-    // --------------------------------------------------------
-
-    bot.once("spawn", () => {
-      if (
-        generation !== state.generation ||
-        state.bot !== bot
-      ) {
-        return;
-      }
-
-      state.connected = true;
-      state.reconnectAttempts = 0;
-
-      log(
-        `[${state.name}] Spawned successfully.`
-      );
-
-      startAutoAuth(state);
-
-      /*
-      Apply the custom skin only once after
-      the player has completely spawned.
-      */
-
-      if (state.skinTimer) {
-        clearTimeout(
-          state.skinTimer
-        );
-      }
-
-      state.skinTimer =
-        setTimeout(() => {
-          state.skinTimer = null;
-
-          if (
-            state.bot === bot &&
-            state.connected &&
-            generation === state.generation
-          ) {
-            applySkin(state);
-          }
-        }, 5000);
-
-      startAntiAfk(state);
-    });
-
-    // --------------------------------------------------------
-    // CHAT
-    // --------------------------------------------------------
-
-    bot.on(
-      "chat",
-      (
-        username,
-        message
-      ) => {
-        if (
-          generation !==
-          state.generation
-        ) {
-          return;
-        }
-
-        if (
-          config.utils?.[
-            "chat-log"
-          ]
-        ) {
-          log(
-            `[${state.name}] <${username}> ${message}`
-          );
-        }
-
-        /*
-        Very simple response.
-        */
-
-        if (
-          config.chat?.respond &&
-          username !== state.name
-        ) {
-          const text =
-            String(message)
-              .toLowerCase()
-              .trim();
-
-          if (
-            text === "hi" ||
-            text === "hello" ||
-            text === "hey"
-          ) {
-            try {
-              bot.chat(
-                `Hello ${username}!`
-              );
-            } catch (_) {}
-          }
-        }
-      }
+    bot.loadPlugin(
+      pathfinder
     );
 
-    // --------------------------------------------------------
-    // KICK
-    // --------------------------------------------------------
-
-    bot.on(
-      "kicked",
-      reason => {
-        if (
-          generation !==
-          state.generation
-        ) {
-          return;
-        }
-
-        log(
-          `[${state.name}] Kicked: ${String(
-            reason
-          )}`
-        );
-      }
-    );
-
-    // --------------------------------------------------------
-    // ERROR
-    // --------------------------------------------------------
-
-    bot.on(
-      "error",
-      error => {
-        if (
-          generation !==
-          state.generation
-        ) {
-          return;
-        }
-
-        recordError(
-          state,
-          error
-        );
-      }
-    );
-
-    // --------------------------------------------------------
-    // END
-    // --------------------------------------------------------
-
-    bot.on(
-      "end",
-      reason => {
-        if (
-          generation !==
-          state.generation
-        ) {
-          return;
-        }
-
-        cleanupBot(
-          state,
-          "connection ended"
-        );
-
-        log(
-          `[${state.name}] Connection ended${
-            reason
-              ? `: ${reason}`
-              : ""
-          }`
-        );
-
-        scheduleReconnect(
-          state,
-          "connection ended"
-        );
-      }
+    registerEvents(
+      state,
+      bot,
+      generation
     );
 
     return true;
   } catch (error) {
     state.bot = null;
 
-    recordError(
+    rememberError(
       state,
       error
     );
@@ -685,9 +1496,9 @@ async function stopBot(state) {
 
   state.manualStop = true;
 
-  state.generation++;
-
   clearReconnect(state);
+
+  state.generation++;
 
   cleanupBot(
     state,
@@ -701,7 +1512,7 @@ async function stopBot(state) {
   );
 }
 
-function restartBot(state) {
+function restartOne(state) {
   if (!state) {
     return {
       success: false,
@@ -710,15 +1521,16 @@ function restartBot(state) {
   }
 
   stopBot(state).finally(() => {
-    if (shuttingDown) return;
+    setTimeout(
+      () => {
+        if (shuttingDown) return;
 
-    setTimeout(() => {
-      if (shuttingDown) return;
+        state.manualStop = false;
 
-      state.manualStop = false;
-
-      startBot(state);
-    }, 5000);
+        startBot(state);
+      },
+      5000
+    );
   });
 
   return {
@@ -728,9 +1540,9 @@ function restartBot(state) {
   };
 }
 
-function restartAllBots() {
+function restartAll() {
   const list =
-    [...STATES.values()];
+    [...states.values()];
 
   Promise.all(
     list.map(
@@ -746,7 +1558,9 @@ function restartAllBots() {
 
             state.manualStop = false;
 
-            startBot(state);
+            startBot(
+              state
+            );
           },
           5000 +
             index * 30000
@@ -766,7 +1580,7 @@ function restartAllBots() {
 // COMMANDS
 // ============================================================
 
-function commandHandler(
+function executeCommand(
   raw,
   selectedBot
 ) {
@@ -787,15 +1601,21 @@ function commandHandler(
   const command =
     parts[0].toLowerCase();
 
+  // ----------------------------------------------------------
   // /restartBots
+  // ----------------------------------------------------------
+
   if (
     command ===
     "/restartbots"
   ) {
-    return restartAllBots();
+    return restartAll();
   }
 
-  // /restartBot name
+  // ----------------------------------------------------------
+  // /restartBot <name>
+  // ----------------------------------------------------------
+
   if (
     command ===
     "/restartbot"
@@ -804,12 +1624,15 @@ function commandHandler(
       parts[1] ||
       selectedBot;
 
-    return restartBot(
-      getState(name)
+    return restartOne(
+      findBot(name)
     );
   }
 
-  // /skin name
+  // ----------------------------------------------------------
+  // /skin <name>
+  // ----------------------------------------------------------
+
   if (
     command ===
     "/skin"
@@ -819,11 +1642,15 @@ function commandHandler(
       selectedBot;
 
     return applySkin(
-      getState(name)
+      findBot(name)
     );
   }
 
-  // /say name message
+  // ----------------------------------------------------------
+  // /say <name> <message>
+  // /say <message> with selected bot
+  // ----------------------------------------------------------
+
   if (
     command ===
     "/say"
@@ -831,19 +1658,19 @@ function commandHandler(
     let name =
       selectedBot;
 
-    let start =
+    let messageStart =
       1;
 
     if (
       parts[1] &&
-      STATES.has(
+      states.has(
         parts[1]
       )
     ) {
       name =
         parts[1];
 
-      start =
+      messageStart =
         2;
     }
 
@@ -856,7 +1683,7 @@ function commandHandler(
     }
 
     const state =
-      getState(name);
+      findBot(name);
 
     if (
       !state ||
@@ -872,9 +1699,14 @@ function commandHandler(
 
     const message =
       parts
-        .slice(start)
+        .slice(
+          messageStart
+        )
         .join(" ")
-        .slice(0, 256);
+        .slice(
+          0,
+          256
+        );
 
     if (!message) {
       return {
@@ -889,13 +1721,19 @@ function commandHandler(
         message
       );
 
+      touch(state);
+
+      log(
+        `[COMMAND] ${name}: ${message}`
+      );
+
       return {
         success: true,
         msg:
           `${name}: ${message}`
       };
     } catch (error) {
-      recordError(
+      rememberError(
         state,
         error
       );
@@ -908,23 +1746,38 @@ function commandHandler(
     }
   }
 
+  // ----------------------------------------------------------
+  // /help
+  // ----------------------------------------------------------
+
+  if (
+    command ===
+    "/help"
+  ) {
+    return {
+      success: true,
+      msg:
+        "/say <Bot> <message>\n" +
+        "/restartBot <Bot>\n" +
+        "/restartBots\n" +
+        "/skin <Bot>\n" +
+        "/help"
+    };
+  }
+
   return {
     success: false,
     msg:
-      "Available: /say, /skin, /restartBot, /restartBots"
+      "Available: /say, /skin, /restartBot, /restartBots, /help"
   };
 }
-
-// ============================================================
-// COMMAND API
-// ============================================================
 
 app.post(
   "/command",
   (req, res) => {
     try {
       res.json(
-        commandHandler(
+        executeCommand(
           req.body?.command,
           req.body?.bot
         )
@@ -951,7 +1804,7 @@ app.post(
 
     if (name) {
       const state =
-        getState(name);
+        findBot(name);
 
       if (!state) {
         return res.status(404).json({
@@ -961,7 +1814,9 @@ app.post(
         });
       }
 
-      await startBot(state);
+      await startBot(
+        state
+      );
 
       return res.json({
         success: true,
@@ -970,30 +1825,32 @@ app.post(
       });
     }
 
-    [...STATES.values()]
-      .forEach(
-        (state, index) => {
-          setTimeout(
-            () => {
-              if (
-                !shuttingDown &&
-                !state.bot &&
-                !state.connecting
-              ) {
-                startBot(
-                  state
-                );
-              }
-            },
-            index * 30000
-          );
-        }
-      );
+    const list =
+      [...states.values()];
+
+    list.forEach(
+      (state, index) => {
+        setTimeout(
+          () => {
+            if (
+              !shuttingDown &&
+              !state.bot &&
+              !state.connecting
+            ) {
+              startBot(
+                state
+              );
+            }
+          },
+          index * 30000
+        );
+      }
+    );
 
     res.json({
       success: true,
       msg:
-        "Bots scheduled 30 seconds apart."
+        "Bots scheduled with 30-second spacing."
     });
   }
 );
@@ -1006,7 +1863,7 @@ app.post(
 
     if (name) {
       const state =
-        getState(name);
+        findBot(name);
 
       if (!state) {
         return res.status(404).json({
@@ -1016,7 +1873,9 @@ app.post(
         });
       }
 
-      await stopBot(state);
+      await stopBot(
+        state
+      );
 
       return res.json({
         success: true,
@@ -1027,7 +1886,7 @@ app.post(
 
     for (
       const state
-      of STATES.values()
+      of states.values()
     ) {
       await stopBot(
         state
@@ -1046,25 +1905,11 @@ app.post(
 // DASHBOARD
 // ============================================================
 
-function escapeHTML(value) {
-  return String(value).replace(
-    /[&<>"']/g,
-    char =>
-      ({
-        "&": "&amp;",
-        "<": "&lt;",
-        ">": "&gt;",
-        '"': "&quot;",
-        "'": "&#39;"
-      })[char]
-  );
-}
-
 app.get(
   "/",
   (req, res) => {
     const options =
-      [...STATES.keys()]
+      [...states.keys()]
         .map(
           name =>
             `<option value="${escapeHTML(
@@ -1075,8 +1920,8 @@ app.get(
         )
         .join("");
 
-    const bots =
-      [...STATES.values()]
+    const cards =
+      [...states.values()]
         .map(
           state => {
             const skin =
@@ -1113,8 +1958,7 @@ ${escapeHTML(
 
 <div class="buttons">
 
-<button
-onclick="action(
+<button onclick="action(
 '/start',
 '${escapeHTML(
               state.name
@@ -1123,8 +1967,7 @@ onclick="action(
 Start
 </button>
 
-<button
-onclick="action(
+<button onclick="action(
 '/stop',
 '${escapeHTML(
               state.name
@@ -1133,8 +1976,7 @@ onclick="action(
 Stop
 </button>
 
-<button
-onclick="command(
+<button onclick="send(
 '/skin ${escapeHTML(
               state.name
             )}'
@@ -1142,8 +1984,7 @@ onclick="command(
 Skin
 </button>
 
-<button
-onclick="command(
+<button onclick="send(
 '/restartBot ${escapeHTML(
               state.name
             )}'
@@ -1168,8 +2009,7 @@ Restart
 
 <meta charset="utf-8">
 
-<meta
-name="viewport"
+<meta name="viewport"
 content="width=device-width,initial-scale=1">
 
 <title>
@@ -1178,11 +2018,11 @@ Minecraft Bot Dashboard
 
 <style>
 
-*{
+* {
 box-sizing:border-box;
 }
 
-body{
+body {
 margin:0;
 padding:24px;
 background:#0d1117;
@@ -1190,12 +2030,12 @@ color:#e6edf3;
 font-family:Arial,sans-serif;
 }
 
-main{
+main {
 max-width:850px;
 margin:auto;
 }
 
-.card{
+.card {
 background:#161b22;
 border:1px solid #30363d;
 border-radius:12px;
@@ -1203,47 +2043,45 @@ padding:18px;
 margin-bottom:16px;
 }
 
-.bot{
+.bot {
 border:1px solid #30363d;
 border-radius:10px;
 padding:14px;
 margin-bottom:10px;
 }
 
-.online{
+.online {
 border-color:#238636;
 }
 
-.offline{
+.offline {
 border-color:#da3633;
 }
 
-.top{
+.top {
 display:flex;
 justify-content:space-between;
 }
 
-.top span{
+.top span {
 color:#8b949e;
 font-size:12px;
 }
 
-.info{
+.info {
+margin-top:8px;
 color:#8b949e;
 font-size:13px;
-margin-top:8px;
 }
 
-.buttons{
+.row {
 display:flex;
 gap:8px;
-flex-wrap:wrap;
-margin-top:12px;
 }
 
-button,
 select,
-input{
+input,
+button {
 background:#0d1117;
 color:#e6edf3;
 border:1px solid #30363d;
@@ -1251,37 +2089,40 @@ border-radius:8px;
 padding:9px 12px;
 }
 
-button{
-cursor:pointer;
+select {
+min-width:160px;
 }
 
-button:hover{
-background:#21262d;
-}
-
-.commandRow{
-display:flex;
-gap:8px;
-}
-
-select{
-min-width:150px;
-}
-
-input{
+input {
 flex:1;
 }
 
-#output{
+button {
+cursor:pointer;
+}
+
+button:hover {
+background:#21262d;
+}
+
+.buttons {
+display:flex;
+gap:8px;
+flex-wrap:wrap;
+margin-top:12px;
+}
+
+#output {
 margin-top:12px;
 padding:12px;
 border:1px solid #30363d;
 border-radius:8px;
 white-space:pre-wrap;
 font-family:Consolas,monospace;
+min-height:45px;
 }
 
-a{
+a {
 color:#58a6ff;
 }
 
@@ -1300,10 +2141,10 @@ Minecraft Bot Dashboard
 <div class="card">
 
 <h2>
-Command
+Command Console
 </h2>
 
-<div class="commandRow">
+<div class="row">
 
 <select id="bot">
 <option value="">
@@ -1315,7 +2156,7 @@ ${options}
 </select>
 
 <input
-id="commandInput"
+id="command"
 placeholder="/say hi everyone"
 >
 
@@ -1327,13 +2168,13 @@ Run
 
 <div class="buttons">
 
-<button
-onclick="command('/restartBots')">
+<button onclick="send(
+'/restartBots'
+)">
 Restart All Bots
 </button>
 
-<button
-onclick="restartSelected()">
+<button onclick="restartSelected()">
 Restart Selected
 </button>
 
@@ -1347,7 +2188,7 @@ Ready.
 
 <div class="card">
 
-${bots}
+${cards}
 
 </div>
 
@@ -1355,40 +2196,44 @@ ${bots}
 Logs
 </a>
 
-</main>
-
 <script>
 
-async function command(text){
+async function send(command) {
 
 const bot =
 document.getElementById(
 "bot"
 ).value;
 
-await send(text,bot);
+await execute(
+command,
+bot
+);
 
 }
 
-async function runCommand(){
+async function runCommand() {
 
-const text =
+const command =
 document.getElementById(
-"commandInput"
+"command"
 ).value.trim();
 
-if(!text)return;
+if(!command) return;
 
 const bot =
 document.getElementById(
 "bot"
 ).value;
 
-await send(text,bot);
+await execute(
+command,
+bot
+);
 
 }
 
-async function restartSelected(){
+async function restartSelected() {
 
 const bot =
 document.getElementById(
@@ -1406,15 +2251,15 @@ return;
 
 }
 
-await send(
+await execute(
 "/restartBot " + bot,
 bot
 );
 
 }
 
-async function send(
-text,
+async function execute(
+command,
 bot
 ){
 
@@ -1426,7 +2271,7 @@ document.getElementById(
 output.textContent =
 "Running...";
 
-try{
+try {
 
 const response =
 await fetch(
@@ -1441,8 +2286,8 @@ headers:{
 
 body:
 JSON.stringify({
-command:text,
-bot:bot
+command,
+bot
 })
 }
 );
@@ -1454,7 +2299,7 @@ output.textContent =
 data.msg ||
 "Done.";
 
-}catch(error){
+} catch(error) {
 
 output.textContent =
 "Command failed.";
@@ -1473,7 +2318,7 @@ document.getElementById(
 "output"
 );
 
-try{
+try {
 
 const response =
 await fetch(
@@ -1488,7 +2333,7 @@ headers:{
 
 body:
 JSON.stringify({
-name:name
+name
 })
 }
 );
@@ -1500,7 +2345,7 @@ output.textContent =
 data.msg ||
 "Done.";
 
-}catch(error){
+} catch(error) {
 
 output.textContent =
 "Request failed.";
@@ -1511,11 +2356,11 @@ output.textContent =
 
 document
 .getElementById(
-"commandInput"
+"command"
 )
 .addEventListener(
 "keydown",
-function(event){
+event => {
 
 if(
 event.key ===
@@ -1530,6 +2375,8 @@ runCommand();
 );
 
 </script>
+
+</main>
 
 </body>
 
@@ -1557,8 +2404,7 @@ app.get(
 
 <html>
 
-<body
-style="
+<body style="
 background:#0d1117;
 color:#e6edf3;
 font-family:Consolas,monospace;
@@ -1574,7 +2420,7 @@ Logs
 </h1>
 
 <pre>${logs
-  .slice(-200)
+  .slice(-250)
   .map(escapeHTML)
   .join("\n")}</pre>
 
@@ -1593,12 +2439,12 @@ process.on(
   "uncaughtException",
   error => {
     const state =
-      STATES.values()
+      states.values()
         .next()
         .value;
 
     if (state) {
-      recordError(
+      rememberError(
         state,
         error
       );
@@ -1614,12 +2460,12 @@ process.on(
   "unhandledRejection",
   reason => {
     const state =
-      STATES.values()
+      states.values()
         .next()
         .value;
 
     if (state) {
-      recordError(
+      rememberError(
         state,
         reason
       );
@@ -1632,7 +2478,7 @@ process.on(
 );
 
 // ============================================================
-// SERVER START
+// START SERVER
 // ============================================================
 
 const server =
@@ -1645,32 +2491,80 @@ const server =
       );
 
       log(
-        `[CONFIG] Found ${STATES.size} bot(s): ${[
-          ...STATES.keys()
+        `[CONFIG] Found ${states.size} bot(s): ${[
+          ...states.keys()
         ].join(", ")}`
       );
 
       /*
-      IMPORTANT:
-      Start bots 30 seconds apart.
+      Start bots one at a time.
+      The next bot starts after the previous bot
+      successfully spawns, then waits 30 seconds.
       */
 
-      [...STATES.values()]
-        .forEach(
-          (state, index) => {
-            setTimeout(
-              () => {
-                if (
-                  !shuttingDown
-                ) {
-                  startBot(
-                    state
-                  );
-                }
-              },
-              index * 30000
-            );
-          }
+      const list =
+        [...states.values()];
+
+      if (list.length > 0) {
+        startBot(list[0]);
+
+        list[0]._startNextAfterSpawn = true;
+      }
+
+      /*
+      Secondary startup watcher.
+      This is intentionally low frequency and only
+      runs during initial startup.
+      */
+
+      let nextIndex = 1;
+
+      const startupWatcher =
+        setInterval(
+          () => {
+            if (
+              shuttingDown ||
+              nextIndex >= list.length
+            ) {
+              clearInterval(
+                startupWatcher
+              );
+              return;
+            }
+
+            const previous =
+              list[nextIndex - 1];
+
+            const next =
+              list[nextIndex];
+
+            if (
+              previous.connected &&
+              !next.bot &&
+              !next.connecting
+            ) {
+              log(
+                `[STARTUP] ${previous.name} is online. Starting ${next.name} in 30s.`
+              );
+
+              next._startupTimer =
+                setTimeout(
+                  () => {
+                    if (
+                      shuttingDown
+                    ) {
+                      return;
+                    }
+
+                    startBot(next);
+                  },
+                  30000
+                );
+
+              nextIndex++;
+            }
+          },
+          3000
         );
     }
   );
@@ -1692,7 +2586,9 @@ server.on(
 // ============================================================
 
 async function shutdown(signal) {
-  if (shuttingDown) return;
+  if (shuttingDown) {
+    return;
+  }
 
   shuttingDown = true;
 
@@ -1702,12 +2598,10 @@ async function shutdown(signal) {
 
   for (
     const state
-    of STATES.values()
+    of states.values()
   ) {
     try {
-      await stopBot(
-        state
-      );
+      await stopBot(state);
     } catch (_) {}
   }
 
@@ -1727,12 +2621,10 @@ async function shutdown(signal) {
 
 process.once(
   "SIGTERM",
-  () =>
-    shutdown("SIGTERM")
+  () => shutdown("SIGTERM")
 );
 
 process.once(
   "SIGINT",
-  () =>
-    shutdown("SIGINT")
+  () => shutdown("SIGINT")
 );
