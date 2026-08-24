@@ -25,7 +25,7 @@ app.use(
 );
 
 // ============================================================
-// CONFIG
+// RAILWAY / MINECRAFT CONFIG
 // ============================================================
 
 const PORT =
@@ -36,13 +36,11 @@ const SERVER_HOST =
   "localhost";
 
 const SERVER_PORT =
-  Number(
-    config?.server?.port
-  ) || 25565;
+  Number(config?.server?.port) || 25565;
 
 const SERVER_VERSION =
   config?.server?.version ||
-  undefined;
+  "1.20.1";
 
 const AUTH_TYPE =
   config?.["bot-account"]?.type ||
@@ -57,7 +55,7 @@ const MAX_ERRORS = 25;
 let shuttingDown = false;
 
 // ============================================================
-// BOT NAMES
+// BOT LIST
 // ============================================================
 
 if (!Array.isArray(config.bots)) {
@@ -78,7 +76,7 @@ const botNames = [
 
 if (!botNames.length) {
   throw new Error(
-    'No bots configured.'
+    "No bots configured."
   );
 }
 
@@ -364,7 +362,7 @@ function clearTimers(state) {
 }
 
 // ============================================================
-// MOVEMENT
+// MOVEMENT / ANTI-AFK
 // ============================================================
 
 function stopMovement(state) {
@@ -538,7 +536,7 @@ function startSneak(state) {
 }
 
 // ============================================================
-// LOOK
+// LOOK AROUND
 // ============================================================
 
 function startLookAround(state) {
@@ -1209,13 +1207,6 @@ function registerEvents(
           state,
           error
         );
-
-        log(
-          `[${state.name}] Pathfinder warning: ${
-            error?.message ||
-            error
-          }`
-        );
       }
 
       if (
@@ -1429,15 +1420,12 @@ async function startBot(state) {
 
   state.manualStop = false;
 
-  if (
-    state.reconnectTimer
-  ) {
+  if (state.reconnectTimer) {
     clearTimeout(
       state.reconnectTimer
     );
 
-    state.reconnectTimer =
-      null;
+    state.reconnectTimer = null;
   }
 
   state.connecting = true;
@@ -1447,7 +1435,7 @@ async function startBot(state) {
 
   try {
     log(
-      `[${state.name}] Connecting to ${SERVER_HOST}:${SERVER_PORT}...`
+      `[${state.name}] Connecting to ${SERVER_HOST}:${SERVER_PORT} using Minecraft ${SERVER_VERSION}...`
     );
 
     const bot =
@@ -1534,7 +1522,6 @@ async function stopBot(state) {
   if (!state) return;
 
   state.manualStop = true;
-
   state.generation++;
 
   clearTimers(state);
@@ -1564,22 +1551,17 @@ function restartBot(state) {
     state
   ).finally(
     () => {
-      if (
-        shuttingDown
-      ) {
+      if (shuttingDown) {
         return;
       }
 
       setTimeout(
         () => {
-          if (
-            shuttingDown
-          ) {
+          if (shuttingDown) {
             return;
           }
 
-          state.manualStop =
-            false;
+          state.manualStop = false;
 
           startBot(
             state
@@ -1683,14 +1665,6 @@ function executeCommand(
       parts[1] ||
       selectedBot;
 
-    if (!name) {
-      return {
-        success: false,
-        msg:
-          "Usage: /restartBot <BotName>"
-      };
-    }
-
     return restartBot(
       getState(name)
     );
@@ -1703,8 +1677,7 @@ function executeCommand(
     let name =
       selectedBot;
 
-    let start =
-      1;
+    let start = 1;
 
     if (
       parts[1] &&
@@ -1715,8 +1688,7 @@ function executeCommand(
       name =
         parts[1];
 
-      start =
-        2;
+      start = 2;
     }
 
     if (!name) {
@@ -1766,10 +1738,6 @@ function executeCommand(
 
       touch(state);
 
-      log(
-        `[COMMAND] ${name}: ${message}`
-      );
-
       return {
         success: true,
         msg:
@@ -1808,10 +1776,6 @@ function executeCommand(
       "Available: /say, /restartBot, /restartBots, /help"
   };
 }
-
-// ============================================================
-// COMMAND API
-// ============================================================
 
 app.post(
   "/command",
@@ -2532,18 +2496,16 @@ const server =
       );
 
       /*
-      Start bots one at a time.
-      The next bot starts 30 seconds after
-      the previous one successfully spawns.
+      Start first bot.
+      Additional bots start 30 seconds after
+      the previous bot is confirmed online.
       */
 
       const list =
         [...states.values()];
 
       if (list.length) {
-        startBot(
-          list[0]
-        );
+        startBot(list[0]);
 
         let nextIndex = 1;
 
@@ -2579,7 +2541,7 @@ const server =
               ) {
 
                 log(
-                  `[STARTUP] ${previous.name} is online. Starting ${next.name} in 30s.`
+                  `[STARTUP] ${previous.name} online. Starting ${next.name} in 30s.`
                 );
 
                 setTimeout(
