@@ -1,7 +1,10 @@
 {
   "bots": [
     "Chomubot",
-    "Samosa"
+    "ChomiBot",
+    "Samosa",
+    "Dahi",
+    
   ],
 
   "bot-account": {
