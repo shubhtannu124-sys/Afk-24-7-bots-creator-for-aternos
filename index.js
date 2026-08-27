@@ -10,6 +10,7 @@ const { addLog, getLogs } = require("./logger");
 const config = require("./settings.json");
 
 const app = express();
+
 app.use(express.json({ limit: "16kb" }));
 
 // ============================================================
@@ -20,15 +21,17 @@ const PORT = Number(process.env.PORT) || 5000;
 const SERVER_HOST = config?.server?.ip || "localhost";
 const SERVER_PORT = Number(config?.server?.port) || 25565;
 const SERVER_VERSION = config?.server?.version || "1.20.1";
-const AUTH_TYPE = config?.["bot-account"]?.type || "offline";
-const DEFAULT_PASSWORD = config?.["bot-account"]?.password || "";
+
+const AUTH_TYPE =
+  config?.["bot-account"]?.type || "offline";
+
+const DEFAULT_PASSWORD =
+  config?.["bot-account"]?.password || "";
+
 const MAX_ERRORS = 25;
 
-// Leave after exactly 1000 seconds, then reconnect.
+// Planned AFK cycle.
 const LEAVE_AFTER_MS = 1000 * 1000;
-
-// Delay before reconnecting after a planned leave.
-// This is intentionally not 1 second to avoid connection throttling.
 const PLANNED_RECONNECT_DELAY_MS = 15000;
 
 let shuttingDown = false;
@@ -38,7 +41,9 @@ let shuttingDown = false;
 // ============================================================
 
 if (!Array.isArray(config.bots)) {
-  throw new Error('settings.json must contain a "bots" array.');
+  throw new Error(
+    'settings.json must contain a "bots" array.'
+  );
 }
 
 const botNames = [
@@ -62,7 +67,6 @@ const states = new Map();
 function createState(name) {
   return {
     name,
-
     bot: null,
     movements: null,
 
@@ -143,6 +147,7 @@ function uptime(state) {
 
 function getState(name) {
   if (!name) return null;
+
   return states.get(String(name)) || null;
 }
 
@@ -170,6 +175,7 @@ function sendDiscord(state, event, message) {
     if (!config.discord?.events?.[event]) return;
 
     const webhook = config.discord?.webhookUrl;
+
     if (!webhook) return;
 
     const url = new URL(webhook);
@@ -184,16 +190,19 @@ function sendDiscord(state, event, message) {
         port: url.port || 443,
         path: url.pathname + url.search,
         method: "POST",
+
         headers: {
           "Content-Type": "application/json",
           "Content-Length": Buffer.byteLength(body)
         },
+
         timeout: 5000
       },
       response => response.resume()
     );
 
     request.on("error", () => {});
+
     request.write(body);
     request.end();
   } catch (_) {}
@@ -318,13 +327,12 @@ function scheduleReconnect(state, reason = "") {
 }
 
 // ============================================================
-// PLANNED 1000-SECOND REJOIN
+// PLANNED 1000 SECOND REJOIN
 // ============================================================
 
 function schedulePlannedRejoin(state) {
   if (state.leaveTimer) {
     clearTimeout(state.leaveTimer);
-    state.leaveTimer = null;
   }
 
   state.leaveTimer = setTimeout(() => {
@@ -343,7 +351,6 @@ function schedulePlannedRejoin(state) {
       `[${state.name}] 1000 seconds reached. Leaving for planned rejoin.`
     );
 
-    // Invalidate all current feature timers before leaving.
     if (state.movementTimer) {
       clearTimeout(state.movementTimer);
       state.movementTimer = null;
@@ -390,8 +397,11 @@ function schedulePlannedRejoin(state) {
     } catch (error) {
       rememberError(state, error);
 
-      // If quit itself fails, force cleanup and schedule reconnect.
-      cleanupBot(state, "planned rejoin cleanup");
+      cleanupBot(
+        state,
+        "planned rejoin cleanup"
+      );
+
       schedulePlannedReconnect(state);
     }
   }, LEAVE_AFTER_MS);
@@ -467,7 +477,9 @@ function startCircleWalk(state) {
   );
 
   const turn =
-    String(movement.turn || "right").toLowerCase();
+    String(
+      movement.turn || "right"
+    ).toLowerCase();
 
   function walkStep() {
     const bot = state.bot;
@@ -483,59 +495,65 @@ function startCircleWalk(state) {
     }
 
     try {
-      bot.setControlState("forward", true);
+      bot.setControlState(
+        "forward",
+        true
+      );
 
-      state.movementTimer = setTimeout(
-        async () => {
-          state.movementTimer = null;
+      state.movementTimer =
+        setTimeout(
+          async () => {
+            state.movementTimer = null;
 
-          if (
-            !state.bot ||
-            !state.connected ||
-            state.manualStop
-          ) {
-            stopMovement(state);
-            return;
-          }
+            if (
+              !state.bot ||
+              !state.connected ||
+              state.manualStop
+            ) {
+              stopMovement(state);
+              return;
+            }
 
-          try {
-            bot.setControlState(
-              "forward",
-              false
-            );
-
-            if (bot.entity) {
-              const yaw =
-                Number(bot.entity.yaw) || 0;
-
-              const newYaw =
-                turn === "left"
-                  ? yaw - Math.PI / 2
-                  : yaw + Math.PI / 2;
-
-              await bot.look(
-                newYaw,
-                0,
-                true
+            try {
+              bot.setControlState(
+                "forward",
+                false
               );
 
-              touch(state);
-            }
-          } catch (error) {
-            rememberError(
-              state,
-              error
-            );
-          }
+              if (bot.entity) {
+                const yaw =
+                  Number(
+                    bot.entity.yaw
+                  ) || 0;
 
-          state.movementTimer =
-            setTimeout(
-              walkStep,
-              1000
-            );
-        },
-        stepTime
-      );
+                const newYaw =
+                  turn === "left"
+                    ? yaw - Math.PI / 2
+                    : yaw + Math.PI / 2;
+
+                await bot.look(
+                  newYaw,
+                  0,
+                  true
+                );
+
+                touch(state);
+              }
+            } catch (error) {
+              rememberError(
+                state,
+                error
+              );
+            }
+
+            state.movementTimer =
+              setTimeout(
+                walkStep,
+                1000
+              );
+          },
+          stepTime
+        );
     } catch (error) {
       rememberError(
         state,
@@ -578,27 +596,33 @@ function startSneak(state) {
 }
 
 // ============================================================
-// LOOK
+// LOOK AROUND
 // ============================================================
 
 function startLookAround(state) {
   if (
-    !config.movement?.["look-around"]?.enabled
+    !config.movement?.[
+      "look-around"
+    ]?.enabled
   ) {
     return;
   }
 
-  const interval = Math.max(
-    5000,
-    Number(
-      config.movement["look-around"].interval
-    ) || 15000
-  );
+  const interval =
+    Math.max(
+      5000,
+      Number(
+        config.movement[
+          "look-around"
+        ].interval
+      ) || 15000
+    );
 
   state.lookTimer =
     setInterval(
       async () => {
-        const bot = state.bot;
+        const bot =
+          state.bot;
 
         if (
           !bot ||
@@ -610,10 +634,15 @@ function startLookAround(state) {
 
         try {
           const yaw =
-            Number(bot.entity.yaw) || 0;
+            Number(
+              bot.entity.yaw
+            ) || 0;
 
           const change =
-            (Math.random() - 0.5) *
+            (
+              Math.random() -
+              0.5
+            ) *
             Math.PI;
 
           await bot.look(
@@ -635,22 +664,28 @@ function startLookAround(state) {
 
 function startRandomJump(state) {
   if (
-    !config.movement?.["random-jump"]?.enabled
+    !config.movement?.[
+      "random-jump"
+    ]?.enabled
   ) {
     return;
   }
 
-  const interval = Math.max(
-    10000,
-    Number(
-      config.movement["random-jump"].interval
-    ) || 30000
-  );
+  const interval =
+    Math.max(
+      10000,
+      Number(
+        config.movement[
+          "random-jump"
+        ].interval
+      ) || 30000
+    );
 
   state.jumpTimer =
     setInterval(
       () => {
-        const bot = state.bot;
+        const bot =
+          state.bot;
 
         if (
           !bot ||
@@ -668,7 +703,8 @@ function startRandomJump(state) {
           setTimeout(
             () => {
               if (
-                state.bot !== bot
+                state.bot !==
+                bot
               ) {
                 return;
               }
@@ -694,7 +730,9 @@ function startRandomJump(state) {
 
 function startAutoAuth(state) {
   const auth =
-    config.utils?.["auto-auth"];
+    config.utils?.[
+      "auto-auth"
+    ];
 
   if (
     !auth?.enabled ||
@@ -706,7 +744,8 @@ function startAutoAuth(state) {
   state.authTimer =
     setTimeout(
       () => {
-        state.authTimer = null;
+        state.authTimer =
+          null;
 
         if (
           !state.bot ||
@@ -740,12 +779,16 @@ function startAutoAuth(state) {
 
 function startChatMessages(state) {
   const settings =
-    config.utils?.["chat-messages"];
+    config.utils?.[
+      "chat-messages"
+    ];
 
   if (
     !settings?.enabled ||
     !settings.repeat ||
-    !Array.isArray(settings.messages) ||
+    !Array.isArray(
+      settings.messages
+    ) ||
     !settings.messages.length
   ) {
     return;
@@ -755,7 +798,9 @@ function startChatMessages(state) {
     Math.max(
       30000,
       Number(
-        settings["repeat-delay"]
+        settings[
+          "repeat-delay"
+        ]
       ) || 120
     ) *
     1000;
@@ -837,14 +882,17 @@ async function tryEat(state) {
   }
 
   if (
-    !config.combat?.["auto-eat"]
+    !config.combat?.[
+      "auto-eat"
+    ]
   ) {
     return;
   }
 
   if (
-    Number(state.bot.food) >
-    12
+    Number(
+      state.bot.food
+    ) > 12
   ) {
     return;
   }
@@ -886,7 +934,9 @@ async function tryEat(state) {
 
 function startAutoEat(state) {
   if (
-    !config.combat?.["auto-eat"]
+    !config.combat?.[
+      "auto-eat"
+    ]
   ) {
     return;
   }
@@ -940,7 +990,9 @@ function isHostileMob(entity) {
 function startCombat(state) {
   if (
     !config.modules?.combat ||
-    !config.combat?.["attack-mobs"]
+    !config.combat?.[
+      "attack-mobs"
+    ]
   ) {
     return;
   }
@@ -1015,7 +1067,22 @@ function startCombat(state) {
 }
 
 // ============================================================
-// CLEANUP BOT
+// FEATURES
+// ============================================================
+
+function startFeatures(state) {
+  startCircleWalk(state);
+  startLookAround(state);
+  startRandomJump(state);
+  startChatMessages(state);
+  startAutoEat(state);
+  startCombat(state);
+  startSneak(state);
+  startAutoAuth(state);
+}
+
+// ============================================================
+// CLEANUP
 // ============================================================
 
 function cleanupBot(
@@ -1096,7 +1163,9 @@ function registerEvents(
 
       try {
         state.movements =
-          new Movements(bot);
+          new Movements(
+            bot
+          );
 
         state.movements.canDig =
           false;
@@ -1115,28 +1184,13 @@ function registerEvents(
           state,
           error
         );
-
-        log(
-          `[${state.name}] Pathfinder warning: ${
-            error?.message ||
-            error
-          }`
-        );
-      }
-
-      if (
-        config.performance?.[
-          "disablePhysics"
-        ]
-      ) {
-        bot.physicsEnabled =
-          false;
       }
 
       startFeatures(state);
 
-      // Start a fresh 1000-second planned leave cycle.
-      schedulePlannedRejoin(state);
+      schedulePlannedRejoin(
+        state
+      );
 
       sendDiscord(
         state,
@@ -1239,7 +1293,8 @@ function registerEvents(
         return;
       }
 
-      state.connected = false;
+      state.connected =
+        false;
 
       let text;
 
@@ -1265,9 +1320,6 @@ function registerEvents(
         "disconnect",
         `Kicked: ${text}`
       );
-
-      // A kick is a real disconnect, so let end/reconnect handling
-      // reconnect instead of creating a second timer here.
     }
   );
 
@@ -1348,21 +1400,6 @@ function registerEvents(
 }
 
 // ============================================================
-// FEATURE START
-// ============================================================
-
-function startFeatures(state) {
-  startCircleWalk(state);
-  startLookAround(state);
-  startRandomJump(state);
-  startChatMessages(state);
-  startAutoEat(state);
-  startCombat(state);
-  startSneak(state);
-  startAutoAuth(state);
-}
-
-// ============================================================
 // START BOT
 // ============================================================
 
@@ -1376,7 +1413,6 @@ async function startBot(state) {
   }
 
   state.manualStop = false;
-
   clearReconnect(state);
 
   state.connecting = true;
@@ -1497,30 +1533,16 @@ function restartBot(state) {
     };
   }
 
-  stopBot(
-    state
-  ).finally(
-    () => {
-      if (shuttingDown) {
-        return;
-      }
+  stopBot(state).finally(() => {
+    if (shuttingDown) return;
 
-      setTimeout(
-        () => {
-          if (shuttingDown) {
-            return;
-          }
+    setTimeout(() => {
+      if (shuttingDown) return;
 
-          state.manualStop = false;
-
-          startBot(
-            state
-          );
-        },
-        5000
-      );
-    }
-  );
+      state.manualStop = false;
+      startBot(state);
+    }, 5000);
+  });
 
   return {
     success: true,
@@ -1538,33 +1560,28 @@ function restartAllBots() {
       state =>
         stopBot(state)
     )
-  ).finally(
-    () => {
-      list.forEach(
-        (state, index) => {
-          setTimeout(
-            () => {
-              if (
-                shuttingDown
-              ) {
-                return;
-              }
+  ).finally(() => {
+    list.forEach(
+      (state, index) => {
+        setTimeout(
+          () => {
+            if (shuttingDown) {
+              return;
+            }
 
-              state.manualStop =
-                false;
+            state.manualStop = false;
 
-              startBot(
-                state
-              );
-            },
-            5000 +
-              index *
-                30000
-          );
-        }
-      );
-    }
-  );
+            startBot(
+              state
+            );
+          },
+          5000 +
+            index *
+              30000
+        );
+      }
+    );
+  });
 
   return {
     success: true,
@@ -1574,7 +1591,154 @@ function restartAllBots() {
 }
 
 // ============================================================
-// COMMANDS
+// /BOTS COMMAND
+//
+// Usage:
+//
+// /bots <BotName> <command>
+//
+// Examples:
+//
+// /bots ChowminBot /say hi everyone
+// /bots Samosa /restart
+// /bots Dahi /say hello
+// /bots all /restart
+// ============================================================
+
+function executeBotsCommand(
+  raw
+) {
+  const text =
+    String(
+      raw || ""
+    ).trim();
+
+  if (!text) {
+    return {
+      success: false,
+      msg:
+        "Usage: /bots <BotName> <command>"
+    };
+  }
+
+  const parts =
+    text.split(/\s+/);
+
+  const botName =
+    parts.shift();
+
+  if (!botName) {
+    return {
+      success: false,
+      msg:
+        "Usage: /bots <BotName> <command>"
+    };
+  }
+
+  const command =
+    parts.join(" ").trim();
+
+  if (!command) {
+    return {
+      success: false,
+      msg:
+        `Usage: /bots ${botName} <command>`
+    };
+  }
+
+  // Restart ALL.
+  if (
+    botName.toLowerCase() ===
+    "all"
+  ) {
+    if (
+      command.toLowerCase() ===
+        "/restart" ||
+      command.toLowerCase() ===
+        "restart"
+    ) {
+      return restartAllBots();
+    }
+
+    return {
+      success: false,
+      msg:
+        "For all bots currently supported: /bots all /restart"
+    };
+  }
+
+  const state =
+    getState(botName);
+
+  if (!state) {
+    return {
+      success: false,
+      msg:
+        `Unknown bot: ${botName}`
+    };
+  }
+
+  // Restart one bot.
+  if (
+    command.toLowerCase() ===
+      "/restart" ||
+    command.toLowerCase() ===
+      "restart"
+  ) {
+    return restartBot(
+      state
+    );
+  }
+
+  if (
+    !state.bot ||
+    !state.connected
+  ) {
+    return {
+      success: false,
+      msg:
+        `${state.name} is not connected.`
+    };
+  }
+
+  /*
+  Strip the leading slash only when necessary
+  for local handling; otherwise send the exact
+  command/message to the selected bot.
+  */
+
+  try {
+    state.bot.chat(
+      command
+    );
+
+    touch(state);
+
+    log(
+      `[BOTS COMMAND] ${state.name} <- ${command}`
+    );
+
+    return {
+      success: true,
+      msg:
+        `${state.name}: ${command}`
+    };
+  } catch (error) {
+    rememberError(
+      state,
+      error
+    );
+
+    return {
+      success: false,
+      msg:
+        `${state.name}: command failed.`
+    };
+  }
+}
+
+// ============================================================
+// GENERAL COMMAND EXECUTION
 // ============================================================
 
 function executeCommand(
@@ -1594,6 +1758,39 @@ function executeCommand(
     };
   }
 
+  if (
+    text.toLowerCase() ===
+    "/restartbots"
+  ) {
+    return restartAllBots();
+  }
+
+  if (
+    text.toLowerCase() ===
+    "/help"
+  ) {
+    return {
+      success: true,
+      msg:
+        "/bots <BotName> <command>\n" +
+        "/bots all /restart"
+    };
+  }
+
+  if (
+    text
+      .toLowerCase()
+      .startsWith("/bots ")
+  ) {
+    return executeBotsCommand(
+      text.slice(6)
+    );
+  }
+
+  /*
+  Keep direct dashboard compatibility.
+  */
+
   const parts =
     text.split(/\s+/);
 
@@ -1602,21 +1799,13 @@ function executeCommand(
 
   if (
     command ===
-    "/restartbots"
-  ) {
-    return restartAllBots();
-  }
-
-  if (
-    command ===
     "/restartbot"
   ) {
-    const name =
-      parts[1] ||
-      selectedBot;
-
     return restartBot(
-      getState(name)
+      getState(
+        parts[1] ||
+          selectedBot
+      )
     );
   }
 
@@ -1641,14 +1830,6 @@ function executeCommand(
       start = 2;
     }
 
-    if (!name) {
-      return {
-        success: false,
-        msg:
-          "Select a bot first."
-      };
-    }
-
     const state =
       getState(name);
 
@@ -1660,7 +1841,7 @@ function executeCommand(
       return {
         success: false,
         msg:
-          `${name} is not connected.`
+          `${name || "Bot"} is not connected.`
       };
     }
 
@@ -1688,14 +1869,10 @@ function executeCommand(
 
       touch(state);
 
-      log(
-        `[COMMAND] ${name}: ${message}`
-      );
-
       return {
         success: true,
         msg:
-          `${name}: ${message}`
+          `${state.name}: ${message}`
       };
     } catch (error) {
       rememberError(
@@ -1711,23 +1888,10 @@ function executeCommand(
     }
   }
 
-  if (
-    command ===
-    "/help"
-  ) {
-    return {
-      success: true,
-      msg:
-        "/say <Bot> <message>\n" +
-        "/restartBot <Bot>\n" +
-        "/restartBots"
-    };
-  }
-
   return {
     success: false,
     msg:
-      "Available: /say, /restartBot, /restartBots, /help"
+      "Use: /bots <BotName> <command>"
   };
 }
 
@@ -1923,30 +2087,20 @@ ${uptime(state)}s
 
 <div class="buttons">
 
-<button onclick="action(
-'/start',
-'${escapeHTML(
+<button onclick="runBotCommand(
+'/bots ${escapeHTML(
             state.name
-          )}'
-)">
-Start
-</button>
-
-<button onclick="action(
-'/stop',
-'${escapeHTML(
-            state.name
-          )}'
-)">
-Stop
-</button>
-
-<button onclick="run(
-'/restartBot ${escapeHTML(
-            state.name
-          )}'
+          )} /restart'
 )">
 Restart
+</button>
+
+<button onclick="selectBot(
+'${escapeHTML(
+            state.name
+          )}'
+)">
+Select
 </button>
 
 </div>
@@ -1970,7 +2124,7 @@ name="viewport"
 content="width=device-width,initial-scale=1">
 
 <title>
-Minecraft AFK Bot Dashboard
+Minecraft Bot Dashboard
 </title>
 
 <style>
@@ -2079,6 +2233,16 @@ font-family:Consolas,monospace;
 min-height:45px;
 }
 
+.commandHelp{
+margin-top:14px;
+padding:12px;
+background:#0d1117;
+border-radius:8px;
+color:#8b949e;
+font-family:Consolas,monospace;
+white-space:pre-wrap;
+}
+
 a{
 color:#58a6ff;
 }
@@ -2092,13 +2256,13 @@ color:#58a6ff;
 <main>
 
 <h1>
-Minecraft AFK Bot Dashboard
+Minecraft Bot Dashboard
 </h1>
 
 <div class="card">
 
 <h2>
-Bot Commands
+Bot Command Console
 </h2>
 
 <div class="row">
@@ -2115,7 +2279,7 @@ ${options}
 
 <input
 id="command"
-placeholder="/say hi everyone"
+placeholder="/bots ChowminBot /say hi everyone"
 >
 
 <button onclick="runCommand()">
@@ -2124,16 +2288,13 @@ Run
 
 </div>
 
-<div class="buttons">
+<div class="commandHelp">
+/bots &lt;BotName&gt; &lt;command&gt;
 
-<button onclick="run('/restartBots')">
-Restart All Bots
-</button>
-
-<button onclick="restartSelected()">
-Restart Selected
-</button>
-
+/bots ChowminBot /say hi everyone
+/bots Samosa /restart
+/bots Dahi /say hello
+/bots all /restart
 </div>
 
 <div id="output">
@@ -2154,17 +2315,23 @@ Logs
 
 <script>
 
-async function run(command){
+function selectBot(name){
 
-const bot =
 document.getElementById(
 "bot"
-).value;
+).value = name;
 
-await execute(
-command,
-bot
+const command =
+document.getElementById(
+"command"
 );
+
+command.value =
+"/bots " +
+name +
+" /say ";
+
+command.focus();
 
 }
 
@@ -2177,52 +2344,25 @@ document.getElementById(
 
 if(!command)return;
 
-const bot =
-document.getElementById(
-"bot"
-).value;
-
-await execute(
-command,
-bot
+await runBotCommand(
+command
 );
 
 }
 
-async function restartSelected(){
-
-const bot =
-document.getElementById(
-"bot"
-).value;
-
-if(!bot){
-
-document.getElementById(
-"output"
-).textContent =
-"Select a bot first.";
-
-return;
-
-}
-
-await execute(
-"/restartBot " + bot,
-bot
-);
-
-}
-
-async function execute(
-command,
-bot
+async function runBotCommand(
+command
 ){
 
 const output =
 document.getElementById(
 "output"
 );
+
+const selected =
+document.getElementById(
+"bot"
+).value;
 
 output.textContent =
 "Running...";
@@ -2243,7 +2383,7 @@ headers:{
 body:
 JSON.stringify({
 command,
-bot
+bot:selected
 })
 }
 );
@@ -2259,52 +2399,6 @@ data.msg ||
 
 output.textContent =
 "Command failed.";
-
-}
-
-}
-
-async function action(
-url,
-name
-){
-
-const output =
-document.getElementById(
-"output"
-);
-
-try{
-
-const response =
-await fetch(
-url,
-{
-method:"POST",
-
-headers:{
-"Content-Type":
-"application/json"
-},
-
-body:
-JSON.stringify({
-name
-})
-}
-);
-
-const data =
-await response.json();
-
-output.textContent =
-data.msg ||
-"Done.";
-
-}catch(error){
-
-output.textContent =
-"Request failed.";
 
 }
 
@@ -2376,7 +2470,7 @@ Logs
 </h1>
 
 <pre>${logs
-  .slice(-250)
+  .slice(-300)
   .map(escapeHTML)
   .join("\n")}</pre>
 
@@ -2394,6 +2488,7 @@ Logs
 process.on(
   "uncaughtException",
   error => {
+
     const state =
       states.values()
         .next()
@@ -2409,12 +2504,14 @@ process.on(
         `[PROCESS] ${String(error)}`
       );
     }
+
   }
 );
 
 process.on(
   "unhandledRejection",
   reason => {
+
     const state =
       states.values()
         .next()
@@ -2430,6 +2527,7 @@ process.on(
         `[PROCESS] ${String(reason)}`
       );
     }
+
   }
 );
 
@@ -2442,6 +2540,7 @@ const server =
     PORT,
     "0.0.0.0",
     () => {
+
       log(
         `Dashboard listening on port ${PORT}.`
       );
@@ -2455,39 +2554,43 @@ const server =
       const list =
         [...states.values()];
 
-      if (list.length) {
-        list.forEach(
-          (state, index) => {
-            setTimeout(
-              () => {
-                if (
-                  !shuttingDown &&
-                  !state.bot &&
-                  !state.connecting
-                ) {
-                  startBot(
-                    state
-                  );
-                }
-              },
-              index *
-                30000
-            );
-          }
-        );
-      }
+      list.forEach(
+        (state, index) => {
+
+          setTimeout(
+            () => {
+
+              if (
+                !shuttingDown &&
+                !state.bot &&
+                !state.connecting
+              ) {
+                startBot(
+                  state
+                );
+              }
+
+            },
+            index *
+              30000
+          );
+
+        }
+      );
     }
   );
 
 server.on(
   "error",
   error => {
+
     log(
       `[HTTP] Server error: ${
         error?.message ||
         error
       }`
     );
+
   }
 );
 
@@ -2496,6 +2599,7 @@ server.on(
 // ============================================================
 
 async function shutdown(signal) {
+
   if (shuttingDown) {
     return;
   }
@@ -2510,11 +2614,13 @@ async function shutdown(signal) {
     const state
     of states.values()
   ) {
+
     try {
       await stopBot(
         state
       );
     } catch (_) {}
+
   }
 
   server.close(
@@ -2529,6 +2635,7 @@ async function shutdown(signal) {
     },
     5000
   ).unref();
+
 }
 
 process.once(
