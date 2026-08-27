@@ -1,4 +1,3 @@
-```javascript
 "use strict";
 
 const express = require("express");
@@ -10,31 +9,26 @@ const { addLog, getLogs } = require("./logger");
 const config = require("./settings.json");
 
 const app = express();
+
 app.use(express.json({ limit: "16kb" }));
 
-// ============================================================
-// CONFIG
-// ============================================================
-
 const PORT = Number(process.env.PORT) || 5000;
-const SERVER_HOST = String(config?.server?.ip || "localhost");
-const SERVER_PORT = Number(config?.server?.port) || 25565;
-const SERVER_VERSION = String(config?.server?.version || "1.20.1");
+const HOST = String(config?.server?.ip || "localhost");
+const MC_PORT = Number(config?.server?.port) || 25565;
+const VERSION = String(config?.server?.version || "1.20.1");
 
-const AUTH_TYPE =
-  String(config?.["bot-account"]?.type || "offline");
+const AUTH = String(
+  config?.["bot-account"]?.type || "offline"
+);
 
-const AUTH_PASSWORD =
-  String(config?.["bot-account"]?.password || "");
+const PASSWORD = String(
+  config?.["bot-account"]?.password || ""
+);
 
-const LEAVE_AFTER_MS = 1000 * 1000;
+const LEAVE_MS = 1000 * 1000;
 const PLANNED_RECONNECT_MS = 15000;
 
 let shuttingDown = false;
-
-// ============================================================
-// BOT LIST
-// ============================================================
 
 if (!Array.isArray(config.bots) || config.bots.length === 0) {
   throw new Error(
@@ -45,21 +39,26 @@ if (!Array.isArray(config.bots) || config.bots.length === 0) {
 const botNames = [
   ...new Set(
     config.bots
-      .map(name => String(name).trim())
+      .map(x => String(x).trim())
       .filter(Boolean)
   )
 ];
 
-// ============================================================
-// STATE
-// ============================================================
-
 const states = new Map();
+
+function log(message) {
+  const text = String(message);
+
+  console.log(text);
+
+  try {
+    addLog(text);
+  } catch (_) {}
+}
 
 function createState(name) {
   return {
     name,
-
     bot: null,
     movements: null,
 
@@ -93,18 +92,20 @@ for (const name of botNames) {
   states.set(name, createState(name));
 }
 
-// ============================================================
-// LOGGING
-// ============================================================
+function getState(name) {
+  return name
+    ? states.get(String(name)) || null
+    : null;
+}
 
-function log(message) {
-  const text = String(message);
+function touch(state) {
+  state.lastActivity = Date.now();
+}
 
-  console.log(text);
-
-  try {
-    addLog(text);
-  } catch (_) {}
+function uptime(state) {
+  return Math.floor(
+    (Date.now() - state.startedAt) / 1000
+  );
 }
 
 function rememberError(state, error) {
@@ -125,20 +126,23 @@ function rememberError(state, error) {
   log(`[${state.name}] ${message}`);
 }
 
-function touch(state) {
-  state.lastActivity = Date.now();
+function clearTimer(state, key) {
+  const timer = state.timers[key];
+
+  if (!timer) {
+    return;
+  }
+
+  clearTimeout(timer);
+  clearInterval(timer);
+
+  state.timers[key] = null;
 }
 
-function uptime(state) {
-  return Math.floor(
-    (Date.now() - state.startedAt) / 1000
-  );
-}
-
-function getState(name) {
-  if (!name) return null;
-
-  return states.get(String(name)) || null;
+function clearTimers(state) {
+  for (const key of Object.keys(state.timers)) {
+    clearTimer(state, key);
+  }
 }
 
 function escapeHTML(value) {
@@ -161,93 +165,51 @@ function escapeHTML(value) {
 
 function sendDiscord(state, event, message) {
   try {
-    if (!config.discord?.enabled) return;
-    if (!config.discord?.events?.[event]) return;
+    if (!config.discord?.enabled) {
+      return;
+    }
+
+    if (!config.discord?.events?.[event]) {
+      return;
+    }
 
     const webhook =
       config.discord?.webhookUrl;
 
-    if (!webhook) return;
+    if (!webhook) {
+      return;
+    }
 
-    const url =
-      new URL(webhook);
+    const url = new URL(webhook);
 
-    const body =
-      JSON.stringify({
-        content:
-          `[${state.name}] ${message}`
-      });
+    const body = JSON.stringify({
+      content:
+        `[${state.name}] ${message}`
+    });
 
-    const request =
-      https.request(
-        {
-          hostname:
-            url.hostname,
+    const req = https.request(
+      {
+        hostname: url.hostname,
+        port: url.port || 443,
+        path: url.pathname + url.search,
+        method: "POST",
 
-          port:
-            url.port || 443,
+        headers: {
+          "Content-Type":
+            "application/json",
 
-          path:
-            url.pathname +
-            url.search,
-
-          method:
-            "POST",
-
-          headers: {
-            "Content-Type":
-              "application/json",
-
-            "Content-Length":
-              Buffer.byteLength(
-                body
-              )
-          },
-
-          timeout: 5000
+          "Content-Length":
+            Buffer.byteLength(body)
         },
-        response => {
-          response.resume();
-        }
-      );
 
-    request.on(
-      "error",
-      () => {}
+        timeout: 5000
+      },
+      response => response.resume()
     );
 
-    request.end(body);
+    req.on("error", () => {});
+    req.end(body);
   } catch (_) {}
-}
-
-// ============================================================
-// TIMER HELPERS
-// ============================================================
-
-function clearTimer(state, name) {
-  const timer =
-    state.timers[name];
-
-  if (!timer) {
-    return;
-  }
-
-  clearTimeout(timer);
-  clearInterval(timer);
-
-  state.timers[name] = null;
-}
-
-function clearTimers(state) {
-  for (
-    const name
-    of Object.keys(state.timers)
-  ) {
-    clearTimer(
-      state,
-      name
-    );
-  }
 }
 
 // ============================================================
@@ -255,10 +217,7 @@ function clearTimers(state) {
 // ============================================================
 
 function stopMovement(state) {
-  clearTimer(
-    state,
-    "movement"
-  );
+  clearTimer(state, "movement");
 
   if (!state.bot) {
     return;
@@ -272,149 +231,131 @@ function stopMovement(state) {
 function startCircleWalk(state) {
   stopMovement(state);
 
+  const cfg =
+    config.movement?.["circle-walk"];
+
   if (
     !config.movement?.enabled ||
-    !config.movement?.[
-      "circle-walk"
-    ]?.enabled
+    !cfg?.enabled
   ) {
     return;
   }
 
-  const settings =
-    config.movement[
-      "circle-walk"
-    ];
+  const stepTime = Math.max(
+    1000,
+    Number(cfg.speed) || 2500
+  );
 
-  const stepTime =
-    Math.max(
-      1000,
-      Number(
-        settings.speed
-      ) || 2500
-    );
-
-  const turningLeft =
+  const left =
     String(
-      settings.turn ||
-      "right"
+      cfg.turn || "right"
     ).toLowerCase() === "left";
 
-  const walkStep =
-    async () => {
-      const bot =
-        state.bot;
+  const step = async () => {
+    const bot = state.bot;
 
-      if (
-        !bot ||
-        !state.connected ||
-        state.manualStop ||
-        shuttingDown
-      ) {
-        return;
-      }
+    if (
+      !bot ||
+      !state.connected ||
+      state.manualStop ||
+      shuttingDown
+    ) {
+      return;
+    }
 
-      try {
-        bot.setControlState(
-          "forward",
-          true
-        );
+    try {
+      bot.setControlState(
+        "forward",
+        true
+      );
 
-        state.timers.movement =
-          setTimeout(
-            async () => {
-              state.timers.movement =
-                null;
+      state.timers.movement =
+        setTimeout(
+          async () => {
+            state.timers.movement =
+              null;
 
-              if (
-                !state.bot ||
-                !state.connected ||
-                state.manualStop
-              ) {
-                stopMovement(
-                  state
+            if (
+              !state.bot ||
+              !state.connected ||
+              state.manualStop
+            ) {
+              stopMovement(
+                state
+              );
+
+              return;
+            }
+
+            try {
+              bot.setControlState(
+                "forward",
+                false
+              );
+
+              if (bot.entity) {
+                const yaw =
+                  Number(
+                    bot.entity.yaw
+                  ) || 0;
+
+                await bot.look(
+                  yaw +
+                    (
+                      left
+                        ? -Math.PI / 2
+                        : Math.PI / 2
+                    ),
+                  0,
+                  true
                 );
-                return;
+
+                touch(state);
               }
-
-              try {
-                bot.setControlState(
-                  "forward",
-                  false
-                );
-
-                if (
-                  bot.entity
-                ) {
-                  const yaw =
-                    Number(
-                      bot.entity.yaw
-                    ) || 0;
-
-                  await bot.look(
-                    yaw +
-                      (
-                        turningLeft
-                          ? -Math.PI / 2
-                          : Math.PI / 2
-                      ),
-                    0,
-                    true
-                  );
-
-                  touch(
-                    state
-                  );
-                }
-              } catch (
+            } catch (error) {
+              rememberError(
+                state,
                 error
-              ) {
-                rememberError(
-                  state,
-                  error
-                );
-              }
+              );
+            }
 
+            if (
+              !state.manualStop &&
+              state.connected
+            ) {
               state.timers.movement =
                 setTimeout(
-                  walkStep,
+                  step,
                   1000
                 );
-            },
-            stepTime
-          );
-      } catch (
-        error
-      ) {
-        rememberError(
-          state,
-          error
+            }
+          },
+          stepTime
         );
+    } catch (error) {
+      rememberError(
+        state,
+        error
+      );
 
-        state.timers.movement =
-          setTimeout(
-            walkStep,
-            3000
-          );
-      }
-    };
+      state.timers.movement =
+        setTimeout(
+          step,
+          3000
+        );
+    }
+  };
 
-  walkStep();
+  step();
 
   log(
     `[${state.name}] Anti-AFK movement enabled.`
   );
 }
 
-// ============================================================
-// SNEAK
-// ============================================================
-
 function startSneak(state) {
   if (
-    !config.utils?.[
-      "anti-afk"
-    ]?.sneak ||
+    !config.utils?.["anti-afk"]?.sneak ||
     !state.bot
   ) {
     return;
@@ -428,10 +369,6 @@ function startSneak(state) {
   } catch (_) {}
 }
 
-// ============================================================
-// LOOK
-// ============================================================
-
 function startLookAround(state) {
   if (
     !config.movement?.[
@@ -441,21 +378,19 @@ function startLookAround(state) {
     return;
   }
 
-  const interval =
-    Math.max(
-      5000,
-      Number(
-        config.movement[
-          "look-around"
-        ].interval
-      ) || 15000
-    );
+  const interval = Math.max(
+    5000,
+    Number(
+      config.movement[
+        "look-around"
+      ].interval
+    ) || 15000
+  );
 
   state.timers.look =
     setInterval(
       async () => {
-        const bot =
-          state.bot;
+        const bot = state.bot;
 
         if (
           !bot ||
@@ -471,31 +406,24 @@ function startLookAround(state) {
               bot.entity.yaw
             ) || 0;
 
-          const change =
+          const delta =
             (
               Math.random() -
               0.5
-            ) *
-            Math.PI;
+            ) * Math.PI;
 
           await bot.look(
-            yaw + change,
+            yaw + delta,
             0,
             false
           );
 
-          touch(
-            state
-          );
+          touch(state);
         } catch (_) {}
       },
       interval
     );
 }
-
-// ============================================================
-// RANDOM JUMP
-// ============================================================
 
 function startRandomJump(state) {
   if (
@@ -519,8 +447,7 @@ function startRandomJump(state) {
   state.timers.jump =
     setInterval(
       () => {
-        const bot =
-          state.bot;
+        const bot = state.bot;
 
         if (
           !bot ||
@@ -558,18 +485,18 @@ function startRandomJump(state) {
 }
 
 // ============================================================
-// AUTO AUTH
+// AUTH / CHAT
 // ============================================================
 
 function startAutoAuth(state) {
-  const settings =
+  const cfg =
     config.utils?.[
       "auto-auth"
     ];
 
   if (
-    !settings?.enabled ||
-    !settings.password
+    !cfg?.enabled ||
+    !cfg.password
   ) {
     return;
   }
@@ -589,15 +516,13 @@ function startAutoAuth(state) {
 
         try {
           state.bot.chat(
-            `/login ${settings.password}`
+            `/login ${cfg.password}`
           );
 
           log(
             `[${state.name}] Auto-auth command sent.`
           );
-        } catch (
-          error
-        ) {
+        } catch (error) {
           rememberError(
             state,
             error
@@ -608,23 +533,19 @@ function startAutoAuth(state) {
     );
 }
 
-// ============================================================
-// REPEATED CHAT
-// ============================================================
-
 function startChatMessages(state) {
-  const settings =
+  const cfg =
     config.utils?.[
       "chat-messages"
     ];
 
   if (
-    !settings?.enabled ||
-    !settings.repeat ||
+    !cfg?.enabled ||
+    !cfg.repeat ||
     !Array.isArray(
-      settings.messages
+      cfg.messages
     ) ||
-    !settings.messages.length
+    !cfg.messages.length
   ) {
     return;
   }
@@ -633,9 +554,7 @@ function startChatMessages(state) {
     Math.max(
       30000,
       Number(
-        settings[
-          "repeat-delay"
-        ]
+        cfg["repeat-delay"]
       ) || 120
     ) * 1000;
 
@@ -652,10 +571,10 @@ function startChatMessages(state) {
         try {
           const message =
             String(
-              settings.messages[
+              cfg.messages[
                 Math.floor(
                   Math.random() *
-                    settings.messages.length
+                    cfg.messages.length
                 )
               ]
             ).slice(
@@ -667,12 +586,8 @@ function startChatMessages(state) {
             message
           );
 
-          touch(
-            state
-          );
-        } catch (
-          error
-        ) {
+          touch(state);
+        } catch (error) {
           rememberError(
             state,
             error
@@ -684,7 +599,7 @@ function startChatMessages(state) {
 }
 
 // ============================================================
-// AUTO EAT
+// FOOD
 // ============================================================
 
 const FOOD_NAMES =
@@ -744,7 +659,8 @@ async function tryEat(state) {
     return;
   }
 
-  state.eating = true;
+  state.eating =
+    true;
 
   try {
     await state.bot.equip(
@@ -754,16 +670,12 @@ async function tryEat(state) {
 
     await state.bot.consume();
 
-    touch(
-      state
-    );
+    touch(state);
 
     log(
       `[${state.name}] Ate ${food.name}.`
     );
-  } catch (
-    error
-  ) {
+  } catch (error) {
     rememberError(
       state,
       error
@@ -817,18 +729,15 @@ const HOSTILE_MOBS =
   ]);
 
 function isHostileMob(entity) {
-  if (
-    !entity ||
-    entity.type !== "mob" ||
-    !entity.position
-  ) {
-    return false;
-  }
-
-  return HOSTILE_MOBS.has(
-    String(
-      entity.name || ""
-    ).toLowerCase()
+  return (
+    !!entity &&
+    entity.type === "mob" &&
+    !!entity.position &&
+    HOSTILE_MOBS.has(
+      String(
+        entity.name || ""
+      ).toLowerCase()
+    )
   );
 }
 
@@ -894,9 +803,7 @@ function startCombat(state) {
               }
             );
 
-          if (
-            target
-          ) {
+          if (target) {
             bot.attack(
               target
             );
@@ -905,9 +812,7 @@ function startCombat(state) {
               state
             );
           }
-        } catch (
-          error
-        ) {
+        } catch (error) {
           rememberError(
             state,
             error
@@ -919,7 +824,7 @@ function startCombat(state) {
 }
 
 // ============================================================
-// PLANNED 1000 SECOND REJOIN
+// 1000 SECOND REJOIN
 // ============================================================
 
 function schedulePlannedRejoin(state) {
@@ -958,9 +863,7 @@ function schedulePlannedRejoin(state) {
           state.bot.quit(
             "planned AFK rejoin"
           );
-        } catch (
-          error
-        ) {
+        } catch (error) {
           rememberError(
             state,
             error
@@ -976,7 +879,7 @@ function schedulePlannedRejoin(state) {
           );
         }
       },
-      LEAVE_AFTER_MS
+      LEAVE_MS
     );
 }
 
@@ -1240,35 +1143,7 @@ function registerEvents(
         );
       }
 
-      startCircleWalk(
-        state
-      );
-
-      startLookAround(
-        state
-      );
-
-      startRandomJump(
-        state
-      );
-
-      startChatMessages(
-        state
-      );
-
-      startAutoEat(
-        state
-      );
-
-      startCombat(
-        state
-      );
-
-      startSneak(
-        state
-      );
-
-      startAutoAuth(
+      startFeatures(
         state
       );
 
@@ -1490,6 +1365,44 @@ function registerEvents(
 }
 
 // ============================================================
+// START FEATURES
+// ============================================================
+
+function startFeatures(state) {
+  startCircleWalk(
+    state
+  );
+
+  startLookAround(
+    state
+  );
+
+  startRandomJump(
+    state
+  );
+
+  startChatMessages(
+    state
+  );
+
+  startAutoEat(
+    state
+  );
+
+  startCombat(
+    state
+  );
+
+  startSneak(
+    state
+  );
+
+  startAutoAuth(
+    state
+  );
+}
+
+// ============================================================
 // START BOT
 // ============================================================
 
@@ -1525,30 +1438,30 @@ async function startBot(
 
   try {
     log(
-      `[${state.name}] Connecting to ${SERVER_HOST}:${SERVER_PORT} using Minecraft ${SERVER_VERSION}...`
+      `[${state.name}] Connecting to ${HOST}:${MC_PORT} using Minecraft ${VERSION}...`
     );
 
     const bot =
       mineflayer.createBot(
         {
           host:
-            SERVER_HOST,
+            HOST,
 
           port:
-            SERVER_PORT,
+            MC_PORT,
 
           username:
             state.name,
 
           auth:
-            AUTH_TYPE,
+            AUTH,
 
           password:
-            AUTH_PASSWORD ||
+            PASSWORD ||
             undefined,
 
           version:
-            SERVER_VERSION,
+            VERSION,
 
           viewDistance:
             2,
@@ -1804,7 +1717,7 @@ function executeBotsCommand(
         false,
 
       msg:
-        "Use /bots all /restart for all bots."
+        "For all bots use: /bots all /restart"
     };
   }
 
@@ -1886,7 +1799,7 @@ function executeBotsCommand(
 }
 
 // ============================================================
-// COMMAND ROUTER
+// GENERAL COMMAND ROUTER
 // ============================================================
 
 function executeCommand(
@@ -1974,7 +1887,10 @@ function executeCommand(
 
 app.post(
   "/command",
-  (req, res) => {
+  (
+    req,
+    res
+  ) => {
     try {
       res.json(
         executeCommand(
@@ -1992,9 +1908,7 @@ app.post(
           false,
 
         msg:
-          String(
-            error
-          )
+          String(error)
       });
     }
   }
@@ -2169,7 +2083,6 @@ app.get(
             }">
 
 <div class="top">
-
 <b>
 ${escapeHTML(
               state.name
@@ -2390,12 +2303,14 @@ Run
 </div>
 
 <div class="help">
+
 /bots &lt;BotName&gt; &lt;command&gt;
 
 /bots ChowminBot /say hi everyone
 /bots Samosa /restart
 /bots Dahi /say hello
 /bots all /restart
+
 </div>
 
 <div id="output">
@@ -2436,16 +2351,6 @@ input.focus();
 
 }
 
-async function run(
-command
-){
-
-await send(
-command
-);
-
-}
-
 async function runCommand(){
 
 const input =
@@ -2461,6 +2366,16 @@ if(
 ){
 return;
 }
+
+await send(
+command
+);
+
+}
+
+async function run(
+command
+){
 
 await send(
 command
@@ -2556,7 +2471,7 @@ runCommand();
 );
 
 // ============================================================
-// LOG PAGE
+// LOGS
 // ============================================================
 
 app.get(
@@ -2585,7 +2500,10 @@ font-family:Consolas,monospace;
 padding:20px;
 ">
 
-<a href="/" style="color:#58a6ff">
+<a
+href="/"
+style="color:#58a6ff"
+>
 Dashboard
 </a>
 
@@ -2641,7 +2559,7 @@ process.on(
 );
 
 // ============================================================
-// RAILWAY SERVER
+// SERVER
 // ============================================================
 
 const server =
@@ -2649,6 +2567,7 @@ const server =
     PORT,
     "0.0.0.0",
     () => {
+
       log(
         `Dashboard listening on port ${PORT}.`
       );
@@ -2666,8 +2585,10 @@ const server =
           state,
           index
         ) => {
+
           setTimeout(
             () => {
+
               if (
                 !shuttingDown
               ) {
@@ -2675,10 +2596,12 @@ const server =
                   state
                 );
               }
+
             },
             index *
               30000
           );
+
         }
       );
     }
@@ -2720,11 +2643,13 @@ async function shutdown(
     const state
     of states.values()
   ) {
+
     try {
       await stopBot(
         state
       );
     } catch (_) {}
+
   }
 
   server.close(
@@ -2760,4 +2685,3 @@ process.once(
       "SIGINT"
     )
 );
-```
